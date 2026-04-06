@@ -1,6 +1,40 @@
 """LegsMixin — scrollable LEGS list: state management and commands."""
 
+import math
+
 from XPPython3 import xp
+
+_R_NM = 3440.065  # Earth radius in nautical miles
+
+
+def _haversine_nm(lat1, lon1, lat2, lon2) -> float:
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+         * math.sin(dlon / 2) ** 2)
+    return _R_NM * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _bearing_deg(lat1, lon1, lat2, lon2) -> float:
+    """Initial bearing from point 1 to point 2, degrees magnetic (true here)."""
+    lat1r, lat2r = math.radians(lat1), math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    x = math.sin(dlon) * math.cos(lat2r)
+    y = (math.cos(lat1r) * math.sin(lat2r)
+         - math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon))
+    return (math.degrees(math.atan2(x, y)) + 360) % 360
+
+
+def _info_latlon(info):
+    """Extract (lat, lon) from an XP FMSEntryInfo object; returns (None, None) if unavailable."""
+    if not info:
+        return None, None
+    lat = getattr(info, "latitude", None) or getattr(info, "lat", None)
+    lon = getattr(info, "longitude", None) or getattr(info, "lon", None)
+    if lat is None or lon is None or (lat == 0.0 and lon == 0.0):
+        return None, None
+    return lat, lon
 
 
 class LegsMixin:
@@ -127,6 +161,34 @@ class LegsMixin:
         if not info or info.altitude <= 0:
             return ""
         return str(info.altitude)
+
+    def _legs_leg_distance_nm(self, row: int) -> float:
+        """Return haversine distance (nm) from the previous FMS entry to this row's entry.
+        Returns -1.0 if either entry is missing or has unresolved coordinates."""
+        idx = self._legs_fms_index_for_row(row)
+        if idx <= 0:
+            return -1.0
+        cur  = self._safe_fms_entry_info(idx)
+        prev = self._safe_fms_entry_info(idx - 1)
+        lat2, lon2 = _info_latlon(cur)
+        lat1, lon1 = _info_latlon(prev)
+        if None in (lat1, lon1, lat2, lon2):
+            return -1.0
+        return _haversine_nm(lat1, lon1, lat2, lon2)
+
+    def _legs_leg_dtk(self, row: int) -> float:
+        """Return desired track (degrees) from the previous FMS entry to this row's entry.
+        Returns -1.0 if either entry is missing or has unresolved coordinates."""
+        idx = self._legs_fms_index_for_row(row)
+        if idx <= 0:
+            return -1.0
+        cur  = self._safe_fms_entry_info(idx)
+        prev = self._safe_fms_entry_info(idx - 1)
+        lat2, lon2 = _info_latlon(cur)
+        lat1, lon1 = _info_latlon(prev)
+        if None in (lat1, lon1, lat2, lon2):
+            return -1.0
+        return _bearing_deg(lat1, lon1, lat2, lon2)
 
     def _legs_read_row_is_active(self, row: int) -> int:
         idx = self._legs_fms_index_for_row(row)

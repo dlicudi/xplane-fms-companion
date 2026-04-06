@@ -487,14 +487,12 @@ class UIMixin:
 
         imgui.separator()
 
-        imgui.columns(4, "route_hdr", border=False)
-        imgui.text_colored("#", *_COL_YELLOW)
-        imgui.next_column()
-        imgui.text_colored("WPT", *_COL_YELLOW)
-        imgui.next_column()
+        imgui.columns(5, "route_hdr", border=False)
+        imgui.text_colored("#",   *_COL_YELLOW); imgui.next_column()
+        imgui.text_colored("WPT", *_COL_YELLOW); imgui.next_column()
+        imgui.text_colored("DTK", *_COL_YELLOW); imgui.next_column()
+        imgui.text_colored("DIS", *_COL_YELLOW); imgui.next_column()
         imgui.text_colored("ALT", *_COL_YELLOW)
-        imgui.next_column()
-        imgui.text_colored("STATUS", *_COL_YELLOW)
         imgui.columns(1)
         imgui.separator()
 
@@ -505,19 +503,22 @@ class UIMixin:
                 continue
             ident     = self._legs_read_row_ident(row) or "---"
             alt       = self._legs_read_row_alt(row)
+            dis       = self._legs_leg_distance_nm(row)
+            dtk       = self._legs_leg_dtk(row)
             is_active = self._legs_read_row_is_active(row)
             is_sel    = self._legs_read_row_is_selected(row)
 
-            if is_active and is_sel:
-                col, status_str = _COL_GREEN, "ACT+SEL"
-            elif is_active:
-                col, status_str = _COL_GREEN, "ACTIVE"
+            if is_active:
+                col = _COL_GREEN
             elif is_sel:
-                col, status_str = _COL_YELLOW, "SEL"
+                col = _COL_YELLOW
             else:
-                col, status_str = _COL_WHITE, ""
+                col = _COL_WHITE
 
-            imgui.columns(4, f"route_r{row}", border=False)
+            dis_str = f"{dis:.0f}" if dis >= 0 else "--"
+            dtk_str = f"{dtk:.0f}\xb0" if dtk >= 0 else "--"
+
+            imgui.columns(5, f"route_r{row}", border=False)
             imgui.text_colored(str(idx + 1), *_COL_DIM)
             imgui.next_column()
             imgui.push_style_color(imgui.COLOR_TEXT, *col)
@@ -525,9 +526,11 @@ class UIMixin:
                 self._cmd_legs_select_row(row)
             imgui.pop_style_color()
             imgui.next_column()
-            imgui.text_colored(alt if alt else "--", *_COL_ORANGE)
+            imgui.text_colored(dtk_str, *_COL_DIM)
             imgui.next_column()
-            imgui.text_colored(status_str, *col)
+            imgui.text_colored(dis_str, *_COL_ORANGE)
+            imgui.next_column()
+            imgui.text_colored(alt if alt else "--", *_COL_DIM)
             imgui.columns(1)
 
         imgui.separator()

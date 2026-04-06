@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Symlink (or copy) a plugin from this repo into X-Plane's PythonPlugins folder.
-# Usage: ./scripts/link_plugin.sh <PLUGIN_FILE> [XPLANE_ROOT]
-#   or:  XPLANE_ROOT=/path/to/X-Plane\ 12 ./scripts/link_plugin.sh <PLUGIN_FILE>
-#   or:  ./scripts/link_plugin.sh --copy <PLUGIN_FILE> /path/to/X-Plane\ 12
+# Usage: ./scripts/link_plugin.sh <PLUGIN_NAME> [XPLANE_ROOT]
+#   or:  XPLANE_ROOT=/path/to/X-Plane\ 12 ./scripts/link_plugin.sh <PLUGIN_NAME>
+#   or:  ./scripts/link_plugin.sh --copy <PLUGIN_NAME> /path/to/X-Plane\ 12
+#
+# PLUGIN_NAME is the PI_*.py filename (e.g. PI_CockpitdecksFMS.py).
+# The script finds it in the appropriate subdirectory automatically.
 #
 # After running: Reload Python plugins in X-Plane (Plugins → XPPython3 → Reload)
 # or restart X-Plane. Delete *.pyc in PythonPlugins if reload doesn't pick up changes.
@@ -18,26 +21,30 @@ XPLANE_ROOT="${XPLANE_ROOT:-$2}"
 PLUGINS_DIR="${XPLANE_ROOT}/Resources/plugins/PythonPlugins"
 
 if [[ -z "$PLUGIN_NAME" ]]; then
-  echo "Usage: $0 <PLUGIN_FILE> [XPLANE_ROOT]"
-  echo "   or: XPLANE_ROOT=/path/to/X-Plane\\ 12 $0 <PLUGIN_FILE>"
+  echo "Usage: $0 <PLUGIN_NAME> [XPLANE_ROOT]"
+  echo "   or: XPLANE_ROOT=/path/to/X-Plane\\ 12 $0 <PLUGIN_NAME>"
   echo ""
   echo "Available plugins:"
-  ls "${REPO_ROOT}"/PI_*.py 2>/dev/null | xargs -n1 basename
+  find "${REPO_ROOT}" -name "PI_*.py" | xargs -n1 basename
   exit 1
 fi
 
-PLUGIN_SRC="${REPO_ROOT}/${PLUGIN_NAME}"
+# Find the plugin file in any subdirectory
+PLUGIN_SRC="$(find "${REPO_ROOT}" -name "${PLUGIN_NAME}" | head -1)"
+
+if [[ -z "$PLUGIN_SRC" ]]; then
+  echo "ERROR: Plugin not found in repo: $PLUGIN_NAME"
+  echo ""
+  echo "Available plugins:"
+  find "${REPO_ROOT}" -name "PI_*.py" | xargs -n1 basename
+  exit 1
+fi
 
 if [[ -z "$XPLANE_ROOT" ]]; then
-  echo "Usage: $0 <PLUGIN_FILE> <XPLANE_ROOT>"
-  echo "   or: XPLANE_ROOT=/path/to/X-Plane\\ 12 $0 <PLUGIN_FILE>"
+  echo "Usage: $0 <PLUGIN_NAME> <XPLANE_ROOT>"
+  echo "   or: XPLANE_ROOT=/path/to/X-Plane\\ 12 $0 <PLUGIN_NAME>"
   echo ""
   echo "Example: $0 PI_CockpitdecksFMS.py \"$HOME/X-Plane 12\""
-  exit 1
-fi
-
-if [[ ! -f "$PLUGIN_SRC" ]]; then
-  echo "ERROR: Plugin source not found: $PLUGIN_SRC"
   exit 1
 fi
 

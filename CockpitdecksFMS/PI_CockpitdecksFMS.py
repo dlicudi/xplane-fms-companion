@@ -36,9 +36,10 @@ from cockpitdecksfms.legs import LegsMixin
 from cockpitdecksfms.models import FlightPlanEntry, FlightPlanInfo, ProcedureInfo
 from cockpitdecksfms.plan_browser import PlanBrowserMixin
 from cockpitdecksfms.procedures import ProceduresMixin
+from cockpitdecksfms.ui import UIMixin
 
 
-class PythonInterface(DrefsMixin, FmsStateMixin, FmsIOMixin, PlanBrowserMixin, LegsMixin, ProceduresMixin):
+class PythonInterface(DrefsMixin, FmsStateMixin, FmsIOMixin, PlanBrowserMixin, LegsMixin, ProceduresMixin, UIMixin):
     NAME = "Cockpitdecks FMS"
     SIG = "xppython3.cockpitdecksfms"
     DESC = (
@@ -134,6 +135,12 @@ class PythonInterface(DrefsMixin, FmsStateMixin, FmsIOMixin, PlanBrowserMixin, L
         self._proc_status: Dict[str, str] = {k: "INIT" for k in self.KINDS}
         self._proc_splice_point: Dict[str, int] = {k: -1 for k in self.KINDS}
         self._proc_loaded: Dict[str, str] = {k: "" for k in self.KINDS}
+        # Two-level drill-down: level 0 = procedure names, level 1 = transitions
+        self._proc_names: Dict[str, List[str]] = {k: [] for k in self.KINDS}
+        self._proc_name_idx: Dict[str, int] = {k: -1 for k in self.KINDS}
+        self._proc_name_window: Dict[str, int] = {k: 0 for k in self.KINDS}
+        self._proc_trans_cache_valid: Dict[str, bool] = {k: False for k in self.KINDS}
+        self._proc_trans_rows_cache: Dict[str, Dict[int, Dict[str, object]]] = {k: {} for k in self.KINDS}
 
         self.string_values: Dict[str, str] = {
             "plan_name": "No flight plans",
@@ -174,6 +181,8 @@ class PythonInterface(DrefsMixin, FmsStateMixin, FmsIOMixin, PlanBrowserMixin, L
         self._list_rows_cache: Dict[int, Dict[str, object]] = {}
         self._list_cache_valid = False
         self._entry_parse_cache: Dict[tuple, list] = {}
+
+        self._ui_init()
 
     # ── Logging ──
 
@@ -257,10 +266,16 @@ class PythonInterface(DrefsMixin, FmsStateMixin, FmsIOMixin, PlanBrowserMixin, L
         self._proc_register_section("arr", self.ARR_DREF_PREFIX, self.ARR_CMD_PREFIX)
         self._proc_register_section("app", self.APP_DREF_PREFIX, self.APP_CMD_PREFIX)
 
+        self._ui_register_command()
+        self._ui_build_menu()
+
         self._refresh_plan_list()
         return self.NAME, self.SIG, self.DESC
 
     def XPluginStop(self):
+        self._ui_destroy_menu()
+        self._ui_destroy_window()
+
         for key, meta in self.commands.items():
             try:
                 xp.unregisterCommandHandler(meta["ref"], meta["fun"], 1, None)
@@ -283,10 +298,12 @@ class PythonInterface(DrefsMixin, FmsStateMixin, FmsIOMixin, PlanBrowserMixin, L
         self.enabled = True
         self._log("XPluginEnable")
         self._proc_airports_from_fms()
+        self._ui_create_window()
         return 1
 
     def XPluginDisable(self):
         self.enabled = False
+        self._ui_destroy_window()
         self._log("XPluginDisable")
         return None
 

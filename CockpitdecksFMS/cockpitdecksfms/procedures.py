@@ -1,4 +1,12 @@
-"""ProceduresMixin — CIFP parsing and DEP/ARR/APP procedure browser."""
+"""ProceduresMixin — CIFP parsing and DEP/ARR/APP procedure browser.
+
+Two independent views per kind (dep/arr/app):
+  - Name list  (dep/list_row_N_*)  : always shows procedure names; tap to select/highlight.
+  - Trans list (dep/trans_row_N_*) : always shows transitions for the selected name.
+
+The two deck pages (DEP and DEP TR) each bind to their own set of datarefs so they
+remain independent — selecting a name on DEP does NOT transform that page.
+"""
 
 import os
 from typing import Dict, List, Optional
@@ -147,32 +155,87 @@ class ProceduresMixin:
     def _proc_invalidate_cache(self, kind: str) -> None:
         self._proc_cache_valid[kind] = False
 
+    def _proc_invalidate_trans_cache(self, kind: str) -> None:
+        self._proc_trans_cache_valid[kind] = False
+
+    def _proc_invalidate_both(self, kind: str) -> None:
+        self._proc_cache_valid[kind] = False
+        self._proc_trans_cache_valid[kind] = False
+
+    def _proc_transitions(self, kind: str) -> List[ProcedureInfo]:
+        """Return transitions for the currently selected procedure name, or [] if none selected."""
+        name_idx = self._proc_name_idx.get(kind, -1)
+        if name_idx < 0:
+            return []
+        names = self._proc_names.get(kind, [])
+        if name_idx >= len(names):
+            return []
+        selected_name = names[name_idx]
+        return [p for p in self._proc_procs.get(kind, []) if p.name == selected_name]
+
+    def _proc_selected_proc_name(self, kind: str) -> str:
+        name_idx = self._proc_name_idx.get(kind, -1)
+        names = self._proc_names.get(kind, [])
+        return names[name_idx] if 0 <= name_idx < len(names) else ""
+
     def _proc_selected_name(self, kind: str) -> str:
+        """Display name of the selected transition."""
+        transitions = self._proc_transitions(kind)
         idx = self._proc_index.get(kind, -1)
-        procs = self._proc_procs.get(kind, [])
-        return procs[idx].display_name if 0 <= idx < len(procs) else ""
+        return transitions[idx].display_name if 0 <= idx < len(transitions) else ""
 
     def _proc_selected_runway(self, kind: str) -> str:
+        transitions = self._proc_transitions(kind)
         idx = self._proc_index.get(kind, -1)
-        procs = self._proc_procs.get(kind, [])
-        return procs[idx].display_runway if 0 <= idx < len(procs) else ""
+        return transitions[idx].display_runway if 0 <= idx < len(transitions) else ""
 
-    def _proc_window_page(self, kind: str) -> int:
-        n = len(self._proc_procs.get(kind, []))
+    # ── Name-list page helpers ──
+
+    def _proc_name_window_page(self, kind: str) -> int:
+        n = len(self._proc_names.get(kind, []))
         if n <= 0:
+            return 1
+        return self._proc_name_window.get(kind, 0) // self.PROC_VISIBLE_ROWS + 1
+
+    def _proc_name_list_page_str(self, kind: str) -> str:
+        n = len(self._proc_names.get(kind, []))
+        if n <= 0:
+            return ""
+        page = self._proc_name_window.get(kind, 0) // self.PROC_VISIBLE_ROWS + 1
+        total = (n + self.PROC_VISIBLE_ROWS - 1) // self.PROC_VISIBLE_ROWS
+        return f"{page}/{total}"
+
+    def _proc_name_sel_count_str(self, kind: str) -> str:
+        name_idx = self._proc_name_idx.get(kind, -1)
+        n = len(self._proc_names.get(kind, []))
+        if n <= 0 or name_idx < 0:
+            return f"-/{self.PROC_VISIBLE_ROWS}"
+        w = self._proc_name_window.get(kind, 0)
+        row_on_page = name_idx - w + 1
+        if 1 <= row_on_page <= self.PROC_VISIBLE_ROWS:
+            return f"{row_on_page}/{self.PROC_VISIBLE_ROWS}"
+        return f"-/{self.PROC_VISIBLE_ROWS}"
+
+    # ── Trans-list page helpers ──
+
+    def _proc_trans_window_page(self, kind: str) -> int:
+        transitions = self._proc_transitions(kind)
+        if not transitions:
             return 1
         return self._proc_window.get(kind, 0) // self.PROC_VISIBLE_ROWS + 1
 
-    def _proc_list_page_str(self, kind: str) -> str:
-        n = len(self._proc_procs.get(kind, []))
+    def _proc_trans_list_page_str(self, kind: str) -> str:
+        transitions = self._proc_transitions(kind)
+        n = len(transitions)
         if n <= 0:
             return ""
         page = self._proc_window.get(kind, 0) // self.PROC_VISIBLE_ROWS + 1
         total = (n + self.PROC_VISIBLE_ROWS - 1) // self.PROC_VISIBLE_ROWS
         return f"{page}/{total}"
 
-    def _proc_sel_count_str(self, kind: str) -> str:
-        n = len(self._proc_procs.get(kind, []))
+    def _proc_trans_sel_count_str(self, kind: str) -> str:
+        transitions = self._proc_transitions(kind)
+        n = len(transitions)
         if n <= 0:
             return "0/0"
         idx = self._proc_index.get(kind, -1)
@@ -181,7 +244,6 @@ class ProceduresMixin:
             row_on_page = idx - w + 1
             if 1 <= row_on_page <= self.PROC_VISIBLE_ROWS:
                 return f"{row_on_page}/{self.PROC_VISIBLE_ROWS}"
-            return f"-/{self.PROC_VISIBLE_ROWS}"
         return f"-/{self.PROC_VISIBLE_ROWS}"
 
     def _proc_max_aligned_window_start(self, n: int) -> int:
@@ -189,20 +251,52 @@ class ProceduresMixin:
             return 0
         return ((n - 1) // self.PROC_VISIBLE_ROWS) * self.PROC_VISIBLE_ROWS
 
+    # ── Name-list cache ──
+
     def _proc_ensure_cache(self, kind: str) -> None:
+        """Render the procedure name list. Always shows names regardless of selection state."""
         if self._proc_cache_valid.get(kind, False):
             return
-        procs = self._proc_procs.get(kind, [])
-        n = len(procs)
+        rows: Dict[int, Dict[str, object]] = {}
+        _empty = {"plan_index": -1, "index": "", "name": "", "runway": "", "is_selected": 0, "status": ""}
+        names = self._proc_names.get(kind, [])
+        w = self._proc_name_window.get(kind, 0)
+        name_idx = self._proc_name_idx.get(kind, -1)
+        for row in range(1, self.PROC_VISIBLE_ROWS + 1):
+            pi = w + (row - 1)
+            if pi < 0 or pi >= len(names):
+                rows[row] = _empty.copy()
+                continue
+            is_sel = int(pi == name_idx)
+            rows[row] = {
+                "plan_index": pi,
+                "index": str(pi + 1),
+                "name": names[pi],
+                "runway": "",
+                "is_selected": is_sel,
+                "status": "SEL" if is_sel else "",
+            }
+        self._proc_rows_cache[kind] = rows
+        self._proc_cache_valid[kind] = True
+
+    # ── Trans-list cache ──
+
+    def _proc_ensure_trans_cache(self, kind: str) -> None:
+        """Render the transition list for the selected procedure name."""
+        if self._proc_trans_cache_valid.get(kind, False):
+            return
+        rows: Dict[int, Dict[str, object]] = {}
+        _empty = {"plan_index": -1, "index": "", "name": "", "runway": "", "is_selected": 0, "status": ""}
+        transitions = self._proc_transitions(kind)
+        n = len(transitions)
         w = self._proc_window.get(kind, 0)
         idx = self._proc_index.get(kind, -1)
-        rows: Dict[int, Dict[str, object]] = {}
         for row in range(1, self.PROC_VISIBLE_ROWS + 1):
             pi = w + (row - 1)
             if pi < 0 or pi >= n:
-                rows[row] = {"plan_index": -1, "index": "", "name": "", "runway": "", "is_selected": 0, "status": ""}
+                rows[row] = _empty.copy()
                 continue
-            proc = procs[pi]
+            proc = transitions[pi]
             is_sel = int(idx >= 0 and pi == idx)
             rows[row] = {
                 "plan_index": pi,
@@ -212,8 +306,8 @@ class ProceduresMixin:
                 "is_selected": is_sel,
                 "status": "SEL" if is_sel else "",
             }
-        self._proc_rows_cache[kind] = rows
-        self._proc_cache_valid[kind] = True
+        self._proc_trans_rows_cache[kind] = rows
+        self._proc_trans_cache_valid[kind] = True
 
     def _proc_read_row_str(self, kind: str, row: int, field: str) -> str:
         self._proc_ensure_cache(kind)
@@ -222,6 +316,15 @@ class ProceduresMixin:
     def _proc_read_row_int(self, kind: str, row: int, field: str) -> int:
         self._proc_ensure_cache(kind)
         val = self._proc_rows_cache.get(kind, {}).get(row, {}).get(field, 0)
+        return val if isinstance(val, int) else 0
+
+    def _proc_read_trans_row_str(self, kind: str, row: int, field: str) -> str:
+        self._proc_ensure_trans_cache(kind)
+        return str(self._proc_trans_rows_cache.get(kind, {}).get(row, {}).get(field, ""))
+
+    def _proc_read_trans_row_int(self, kind: str, row: int, field: str) -> int:
+        self._proc_ensure_trans_cache(kind)
+        val = self._proc_trans_rows_cache.get(kind, {}).get(row, {}).get(field, 0)
         return val if isinstance(val, int) else 0
 
     # ── Airport and procedure population ──
@@ -275,9 +378,13 @@ class ProceduresMixin:
         self._proc_procs["app"] = [p for p in dest_procs if p.proc_type == "APP"]
 
         for k in self.KINDS:
+            self._proc_names[k] = list(dict.fromkeys(p.name for p in self._proc_procs[k]))
+            self._proc_name_idx[k] = -1
+            self._proc_name_window[k] = 0
             self._proc_index[k] = -1
             self._proc_window[k] = 0
             self._proc_cache_valid[k] = False
+            self._proc_trans_cache_valid[k] = False
             self._proc_status[k] = "READY"
             self._proc_splice_point[k] = -1
             self._proc_loaded[k] = ""
@@ -291,19 +398,22 @@ class ProceduresMixin:
     def _proc_register_section(self, kind: str, dref_prefix: str, cmd_prefix: str) -> None:
         p = dref_prefix
         c = cmd_prefix
+
+        # ── Shared datarefs ──
         self._register_live_string_dref("airport", lambda k=kind: self._proc_airport_for(k), prefix=p)
         self._register_live_string_dref("status", lambda k=kind: self._proc_status.get(k, ""), prefix=p)
         self._register_live_string_dref("loaded_name", lambda k=kind: self._proc_loaded.get(k, ""), prefix=p)
-        self._register_live_string_dref("selected_name", lambda k=kind: self._proc_selected_name(k), prefix=p)
-        self._register_live_string_dref("selected_runway", lambda k=kind: self._proc_selected_runway(k), prefix=p)
-        self._register_live_string_dref("list_page", lambda k=kind: self._proc_list_page_str(k), prefix=p)
-        self._register_live_string_dref("list_sel_count", lambda k=kind: self._proc_sel_count_str(k), prefix=p)
-        self._register_live_int_dref("count", lambda k=kind: len(self._proc_procs.get(k, [])), prefix=p)
+        self._register_live_string_dref("selected_proc_name", lambda k=kind: self._proc_selected_proc_name(k), prefix=p)
+
+        # ── Name-list datarefs ──
+        self._register_live_string_dref("list_page", lambda k=kind: self._proc_name_list_page_str(k), prefix=p)
+        self._register_live_string_dref("list_sel_count", lambda k=kind: self._proc_name_sel_count_str(k), prefix=p)
+        self._register_live_int_dref("list_window_page", lambda k=kind: self._proc_name_window_page(k), prefix=p)
+        self._register_live_int_dref("name_count", lambda k=kind: len(self._proc_names.get(k, [])), prefix=p)
         self._register_live_int_dref(
-            "index",
-            lambda k=kind: (self._proc_index.get(k, -1) + 1) if self._proc_index.get(k, -1) >= 0 else 0,
+            "name_index",
+            lambda k=kind: (self._proc_name_idx.get(k, -1) + 1) if self._proc_name_idx.get(k, -1) >= 0 else 0,
             prefix=p)
-        self._register_live_int_dref("list_window_page", lambda k=kind: self._proc_window_page(k), prefix=p)
         for row in range(1, self.PROC_VISIBLE_ROWS + 1):
             self._register_live_string_dref(
                 f"list_row_{row}_name", lambda k=kind, r=row: self._proc_read_row_str(k, r, "name"), prefix=p)
@@ -317,44 +427,168 @@ class ProceduresMixin:
                 f"list_row_{row}_is_selected",
                 lambda k=kind, r=row: self._proc_read_row_int(k, r, "is_selected"),
                 prefix=p)
-        self._create_command("scroll_up", f"Scroll {kind} procedure list up",
+
+        # ── Trans-list datarefs ──
+        self._register_live_string_dref("trans_list_page", lambda k=kind: self._proc_trans_list_page_str(k), prefix=p)
+        self._register_live_string_dref("trans_list_sel_count", lambda k=kind: self._proc_trans_sel_count_str(k), prefix=p)
+        self._register_live_string_dref("selected_name", lambda k=kind: self._proc_selected_name(k), prefix=p)
+        self._register_live_string_dref("selected_runway", lambda k=kind: self._proc_selected_runway(k), prefix=p)
+        self._register_live_int_dref("trans_list_window_page", lambda k=kind: self._proc_trans_window_page(k), prefix=p)
+        self._register_live_int_dref("trans_count", lambda k=kind: len(self._proc_transitions(k)), prefix=p)
+        self._register_live_int_dref(
+            "index",
+            lambda k=kind: (self._proc_index.get(k, -1) + 1) if self._proc_index.get(k, -1) >= 0 else 0,
+            prefix=p)
+        for row in range(1, self.PROC_VISIBLE_ROWS + 1):
+            self._register_live_string_dref(
+                f"trans_row_{row}_name", lambda k=kind, r=row: self._proc_read_trans_row_str(k, r, "name"), prefix=p)
+            self._register_live_string_dref(
+                f"trans_row_{row}_runway", lambda k=kind, r=row: self._proc_read_trans_row_str(k, r, "runway"), prefix=p)
+            self._register_live_string_dref(
+                f"trans_row_{row}_index", lambda k=kind, r=row: self._proc_read_trans_row_str(k, r, "index"), prefix=p)
+            self._register_live_string_dref(
+                f"trans_row_{row}_status", lambda k=kind, r=row: self._proc_read_trans_row_str(k, r, "status"), prefix=p)
+            self._register_live_int_dref(
+                f"trans_row_{row}_is_selected",
+                lambda k=kind, r=row: self._proc_read_trans_row_int(k, r, "is_selected"),
+                prefix=p)
+
+        # ── Name-list commands ──
+        self._create_command("scroll_up", f"Scroll {kind} name list up",
                              lambda k=kind: self._cmd_proc_scroll_up(k), prefix=c)
-        self._create_command("scroll_down", f"Scroll {kind} procedure list down",
+        self._create_command("scroll_down", f"Scroll {kind} name list down",
                              lambda k=kind: self._cmd_proc_scroll_down(k), prefix=c)
-        self._create_command("select_row_1", f"Select {kind} row 1",
+        self._create_command("select_row_1", f"Select {kind} name row 1",
                              lambda k=kind: self._cmd_proc_select_row(k, 1), prefix=c)
-        self._create_command("select_row_2", f"Select {kind} row 2",
+        self._create_command("select_row_2", f"Select {kind} name row 2",
                              lambda k=kind: self._cmd_proc_select_row(k, 2), prefix=c)
-        self._create_command("select_row_3", f"Select {kind} row 3",
+        self._create_command("select_row_3", f"Select {kind} name row 3",
                              lambda k=kind: self._cmd_proc_select_row(k, 3), prefix=c)
-        self._create_command("previous", f"Select previous {kind} procedure",
+        self._create_command("previous", f"Select previous {kind} name",
                              lambda k=kind: self._cmd_proc_previous(k), prefix=c)
-        self._create_command("next", f"Select next {kind} procedure",
+        self._create_command("next", f"Select next {kind} name",
                              lambda k=kind: self._cmd_proc_next(k), prefix=c)
-        self._create_command("clear_selected", f"Clear {kind} selection",
+        self._create_command("clear_name", f"Clear {kind} name selection",
+                             lambda k=kind: self._cmd_proc_clear_name(k), prefix=c)
+
+        # ── Trans-list commands ──
+        self._create_command("trans_scroll_up", f"Scroll {kind} transition list up",
+                             lambda k=kind: self._cmd_proc_trans_scroll_up(k), prefix=c)
+        self._create_command("trans_scroll_down", f"Scroll {kind} transition list down",
+                             lambda k=kind: self._cmd_proc_trans_scroll_down(k), prefix=c)
+        self._create_command("select_trans_row_1", f"Select {kind} transition row 1",
+                             lambda k=kind: self._cmd_proc_select_trans_row(k, 1), prefix=c)
+        self._create_command("select_trans_row_2", f"Select {kind} transition row 2",
+                             lambda k=kind: self._cmd_proc_select_trans_row(k, 2), prefix=c)
+        self._create_command("select_trans_row_3", f"Select {kind} transition row 3",
+                             lambda k=kind: self._cmd_proc_select_trans_row(k, 3), prefix=c)
+        self._create_command("trans_previous", f"Select previous {kind} transition",
+                             lambda k=kind: self._cmd_proc_trans_previous(k), prefix=c)
+        self._create_command("trans_next", f"Select next {kind} transition",
+                             lambda k=kind: self._cmd_proc_trans_next(k), prefix=c)
+        self._create_command("clear_selected", f"Clear {kind} transition selection",
                              lambda k=kind: self._cmd_proc_clear_selected(k), prefix=c)
+
+        # ── Shared commands ──
         self._create_command("activate", f"Insert selected {kind} procedure into FMS",
                              lambda k=kind: self._cmd_proc_activate(k), prefix=c)
         self._create_command("refresh", f"Reload {kind} procedures from CIFP",
                              lambda k=kind: self._cmd_proc_refresh(k), prefix=c)
+        self._create_command("back", f"Clear {kind} name selection (back to name list)",
+                             lambda k=kind: self._cmd_proc_back(k), prefix=c)
 
-    # ── Commands ──
+    # ── Commands — name list ──
+
+    def _cmd_proc_back(self, kind: str) -> None:
+        """Clear the selected procedure name, resetting the trans list."""
+        self._proc_name_idx[kind] = -1
+        self._proc_index[kind] = -1
+        self._proc_window[kind] = 0
+        self._proc_invalidate_both(kind)
+        self._log(f"proc_back({kind})")
 
     def _cmd_proc_scroll_up(self, kind: str) -> None:
-        procs = self._proc_procs.get(kind, [])
-        if not procs:
+        names = self._proc_names.get(kind, [])
+        if not names:
+            return
+        w = self._proc_name_window.get(kind, 0)
+        new_start = max(0, w - self.PROC_VISIBLE_ROWS)
+        if new_start != w:
+            self._proc_name_window[kind] = new_start
+            self._proc_invalidate_cache(kind)
+            self._log(f"proc_scroll_up({kind}) ->", new_start)
+
+    def _cmd_proc_scroll_down(self, kind: str) -> None:
+        names = self._proc_names.get(kind, [])
+        n = len(names)
+        if n <= 0:
+            return
+        w = self._proc_name_window.get(kind, 0)
+        max_w = self._proc_max_aligned_window_start(n)
+        new_start = min(w + self.PROC_VISIBLE_ROWS, max_w)
+        if new_start != w:
+            self._proc_name_window[kind] = new_start
+            self._proc_invalidate_cache(kind)
+            self._log(f"proc_scroll_down({kind}) ->", new_start)
+
+    def _cmd_proc_select_row(self, kind: str, row: int) -> None:
+        """Select (highlight) a procedure name. Does not drill in — stays on name list."""
+        names = self._proc_names.get(kind, [])
+        w = self._proc_name_window.get(kind, 0)
+        pi = w + (row - 1)
+        if not names or pi < 0 or pi >= len(names):
+            return
+        self._proc_name_idx[kind] = pi
+        # Reset transition state for the newly selected name
+        self._proc_index[kind] = -1
+        self._proc_window[kind] = 0
+        self._proc_invalidate_both(kind)
+        self._log(f"proc_select_row({kind}, {row}) -> selected name '{names[pi]}'")
+        # Auto-select if there is exactly one transition
+        transitions = self._proc_transitions(kind)
+        if len(transitions) == 1:
+            self._proc_index[kind] = 0
+            self._proc_invalidate_trans_cache(kind)
+            self._log(f"proc_select_row({kind}) auto-selected sole transition")
+
+    def _cmd_proc_previous(self, kind: str) -> None:
+        """Scroll the name list window up by one row."""
+        w = self._proc_name_window.get(kind, 0)
+        self._proc_name_window[kind] = max(0, w - 1)
+        self._proc_invalidate_cache(kind)
+
+    def _cmd_proc_next(self, kind: str) -> None:
+        """Scroll the name list window down by one row."""
+        names = self._proc_names.get(kind, [])
+        n = len(names)
+        w = self._proc_name_window.get(kind, 0)
+        max_w = max(0, n - 1)
+        self._proc_name_window[kind] = min(w + 1, max_w)
+        self._proc_invalidate_cache(kind)
+
+    def _cmd_proc_clear_name(self, kind: str) -> None:
+        """Clear the name selection without changing the transition window."""
+        self._proc_name_idx[kind] = -1
+        self._proc_invalidate_both(kind)
+        self._log(f"proc_clear_name({kind})")
+
+    # ── Commands — transition list ──
+
+    def _cmd_proc_trans_scroll_up(self, kind: str) -> None:
+        transitions = self._proc_transitions(kind)
+        if not transitions:
             return
         w = self._proc_window.get(kind, 0)
         new_start = max(0, w - self.PROC_VISIBLE_ROWS)
         if new_start != w:
             self._proc_window[kind] = new_start
             self._proc_index[kind] = -1
-            self._proc_invalidate_cache(kind)
-            self._log(f"proc_scroll_up({kind}) ->", new_start)
+            self._proc_invalidate_trans_cache(kind)
+            self._log(f"proc_trans_scroll_up({kind}) ->", new_start)
 
-    def _cmd_proc_scroll_down(self, kind: str) -> None:
-        procs = self._proc_procs.get(kind, [])
-        n = len(procs)
+    def _cmd_proc_trans_scroll_down(self, kind: str) -> None:
+        transitions = self._proc_transitions(kind)
+        n = len(transitions)
         if n <= 0:
             return
         w = self._proc_window.get(kind, 0)
@@ -363,50 +597,44 @@ class ProceduresMixin:
         if new_start != w:
             self._proc_window[kind] = new_start
             self._proc_index[kind] = -1
-            self._proc_invalidate_cache(kind)
-            self._log(f"proc_scroll_down({kind}) ->", new_start)
+            self._proc_invalidate_trans_cache(kind)
+            self._log(f"proc_trans_scroll_down({kind}) ->", new_start)
 
-    def _cmd_proc_select_row(self, kind: str, row: int) -> None:
-        procs = self._proc_procs.get(kind, [])
+    def _cmd_proc_select_trans_row(self, kind: str, row: int) -> None:
+        transitions = self._proc_transitions(kind)
         w = self._proc_window.get(kind, 0)
         pi = w + (row - 1)
-        if not procs or pi < 0 or pi >= len(procs):
+        if not transitions or pi < 0 or pi >= len(transitions):
             return
         self._proc_index[kind] = pi
-        self._proc_invalidate_cache(kind)
-        self._log(f"proc_select_row({kind}, {row}) -> index={pi}")
+        self._proc_invalidate_trans_cache(kind)
+        self._log(f"proc_select_trans_row({kind}, {row}) -> transition index={pi}")
 
-    def _cmd_proc_previous(self, kind: str) -> None:
-        procs = self._proc_procs.get(kind, [])
-        if not procs:
+    def _cmd_proc_trans_previous(self, kind: str) -> None:
+        transitions = self._proc_transitions(kind)
+        if not transitions:
             return
         w = self._proc_window.get(kind, 0)
         idx = self._proc_index.get(kind, -1)
-        end = min(w + self.PROC_VISIBLE_ROWS, len(procs))
-        if idx < w or idx >= end:
-            self._proc_index[kind] = end - 1
-        else:
-            self._proc_index[kind] = max(w, idx - 1)
-        self._proc_invalidate_cache(kind)
-        self._log(f"proc_previous({kind}) -> index={self._proc_index[kind]}")
+        end = min(w + self.PROC_VISIBLE_ROWS, len(transitions))
+        self._proc_index[kind] = (end - 1) if (idx < w or idx >= end) else max(w, idx - 1)
+        self._proc_invalidate_trans_cache(kind)
+        self._log(f"proc_trans_previous({kind}) -> index={self._proc_index[kind]}")
 
-    def _cmd_proc_next(self, kind: str) -> None:
-        procs = self._proc_procs.get(kind, [])
-        if not procs:
+    def _cmd_proc_trans_next(self, kind: str) -> None:
+        transitions = self._proc_transitions(kind)
+        if not transitions:
             return
         w = self._proc_window.get(kind, 0)
         idx = self._proc_index.get(kind, -1)
-        end = min(w + self.PROC_VISIBLE_ROWS, len(procs))
-        if idx < w or idx >= end:
-            self._proc_index[kind] = w
-        else:
-            self._proc_index[kind] = min(end - 1, idx + 1)
-        self._proc_invalidate_cache(kind)
-        self._log(f"proc_next({kind}) -> index={self._proc_index[kind]}")
+        end = min(w + self.PROC_VISIBLE_ROWS, len(transitions))
+        self._proc_index[kind] = w if (idx < w or idx >= end) else min(end - 1, idx + 1)
+        self._proc_invalidate_trans_cache(kind)
+        self._log(f"proc_trans_next({kind}) -> index={self._proc_index[kind]}")
 
     def _cmd_proc_clear_selected(self, kind: str) -> None:
         self._proc_index[kind] = -1
-        self._proc_invalidate_cache(kind)
+        self._proc_invalidate_trans_cache(kind)
         self._log(f"proc_clear_selected({kind})")
 
     def _cmd_proc_refresh(self, kind: str) -> None:
@@ -418,12 +646,12 @@ class ProceduresMixin:
 
     def _cmd_proc_activate(self, kind: str) -> None:
         """Insert selected procedure waypoints into the FMS."""
-        procs = self._proc_procs.get(kind, [])
+        transitions = self._proc_transitions(kind)
         idx = self._proc_index.get(kind, -1)
-        if idx < 0 or idx >= len(procs):
+        if idx < 0 or idx >= len(transitions):
             self._log(f"proc_activate({kind}): nothing selected")
             return
-        proc = procs[idx]
+        proc = transitions[idx]
         if not proc.waypoints:
             self._log(f"proc_activate({kind}): no waypoints for", proc.display_name)
             return
@@ -524,4 +752,4 @@ class ProceduresMixin:
             self._proc_status[kind] = f"ERR {exc}"
             self._log(f"proc_activate({kind}) error:", exc)
 
-        self._proc_invalidate_cache(kind)
+        self._proc_invalidate_trans_cache(kind)

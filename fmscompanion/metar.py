@@ -72,10 +72,11 @@ def parse_wind(metar: str) -> Tuple[Optional[float], Optional[float]]:
 def runway_heading(rwy_id: str) -> float:
     """Derive the approximate magnetic heading from a runway identifier.
 
-    Examples: "28L" → 280°, "36" → 360°, "01" → 10°, "9R" → 90°.
+    Handles standard L/R/C suffixes and CIFP variant letters (B, D, G, …).
+    Examples: "28L" → 280°, "36" → 360°, "01" → 10°, "06B" → 60°.
     """
-    # Strip suffix (L / R / C / W / T) and leading zeros
-    num_str = re.sub(r'[LRCWT]$', '', rwy_id.strip().upper())
+    # Strip any trailing alphabetic characters (L, R, C and CIFP variants like B, D, G)
+    num_str = re.sub(r'[A-Z]+$', '', rwy_id.strip().upper())
     try:
         num = int(num_str)
     except ValueError:

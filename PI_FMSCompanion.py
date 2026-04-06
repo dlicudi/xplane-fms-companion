@@ -38,6 +38,8 @@ from fmscompanion.fms_io import FmsIOMixin
 from fmscompanion.fms_state import FmsStateMixin
 from fmscompanion.legs import LegsMixin
 from fmscompanion.models import FlightPlanInfo, ValidationIssue, SEVERITY_INFO, SEVERITY_WARN
+import re as _re
+
 from fmscompanion.metar import fetch_metar, parse_wind, rank_runways
 from fmscompanion.nav_monitor import NavMonitorMixin
 from fmscompanion.plan_browser import PlanBrowserMixin
@@ -177,11 +179,20 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         # ── Nav monitor ──
         self._nav_monitor_init()
 
-        # ── Wind / METAR ──
+        # ── Wind / METAR — departure ──
+        self.dep_wind_metar: str = ""
+        self.dep_wind_dir:   Optional[float] = None
+        self.dep_wind_spd:   Optional[float] = None
+        self.dep_runway_ranking:   list = []
+        self.dep_recommended_sids: list = []   # [(display_name, display_runway), …]
+
+        # ── Wind / METAR — arrival ──
         self.wind_metar: str = ""
         self.wind_dir:   Optional[float] = None
         self.wind_spd:   Optional[float] = None
-        self.wind_runway_ranking: list = []
+        self.wind_runway_ranking:   list = []
+        self.arr_recommended_apps:  list = []  # [(display_name, display_runway), …]
+        self.arr_recommended_stars: list = []  # [display_name, …]
 
         # ── Internal caches ──
         self._perf_enabled     = True
@@ -263,25 +274,66 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
             self._log("Validation error:", exc)
             self.validation_issues = []
 
+    # ── Wind helpers ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _rwy_num(rwy_id: str) -> str:
+        """Strip all trailing letters from a runway id, returning just the digits.
+        Works for L/R/C suffixes and CIFP variant letters (B, D, G, …).
+        E.g. "06B" → "06", "28L" → "28", "27" → "27".
+        """
+        return _re.sub(r'[A-Za-z]+$', '', rwy_id.strip())
+
     def _cmd_wind_refresh(self):
-        """Fetch METAR for dest airport, parse wind, rank runways from APP procedures."""
+        """Fetch METAR for both DEP and DEST, rank runways, recommend procedures."""
+        self._wind_refresh_dep()
+        self._wind_refresh_arr()
+
+    def _wind_refresh_dep(self):
+        icao = (self.proc_dep_icao or "").strip().upper()
+        metar = fetch_metar(icao) if icao else ""
+        self.dep_wind_metar = metar
+        dir_, spd = parse_wind(metar)
+        self.dep_wind_dir = dir_
+        self.dep_wind_spd = spd
+        self._log(f"wind_refresh DEP {icao}: metar={bool(metar)} dir={dir_} spd={spd}")
+
+        # DEP procedures share a physical runway (e.g. "06B"/"06C" → both runway 06)
+        # Deduplicate to unique numeric runway IDs before ranking.
+        seen: set = set()
+        rwy_ids = []
+        for proc in self._proc_procs.get("dep", []):
+            num = self._rwy_num(proc.display_runway or "")
+            if num and num not in seen:
+                seen.add(num)
+                rwy_ids.append(num)
+
+        if rwy_ids and dir_ is not None and spd is not None:
+            self.dep_runway_ranking = rank_runways(rwy_ids, dir_, spd)
+        else:
+            self.dep_runway_ranking = []
+
+        # SIDs for the best departure runway
+        if self.dep_runway_ranking:
+            best_num = self._rwy_num(self.dep_runway_ranking[0][0])
+            self.dep_recommended_sids = [
+                (proc.display_name, proc.display_runway)
+                for proc in self._proc_procs.get("dep", [])
+                if self._rwy_num(proc.display_runway or "") == best_num
+            ]
+        else:
+            self.dep_recommended_sids = []
+
+    def _wind_refresh_arr(self):
         icao = (self.proc_dest_icao or "").strip().upper()
-        if not icao:
-            self._log("wind_refresh: no dest ICAO")
-            self.wind_metar = ""
-            self.wind_dir   = None
-            self.wind_spd   = None
-            self.wind_runway_ranking = []
-            return
-
-        metar = fetch_metar(icao)
+        metar = fetch_metar(icao) if icao else ""
         self.wind_metar = metar
-        wind_dir, wind_spd = parse_wind(metar)
-        self.wind_dir = wind_dir
-        self.wind_spd = wind_spd
-        self._log(f"wind_refresh: {icao} metar={bool(metar)} dir={wind_dir} spd={wind_spd}")
+        dir_, spd = parse_wind(metar)
+        self.wind_dir = dir_
+        self.wind_spd = spd
+        self._log(f"wind_refresh ARR {icao}: metar={bool(metar)} dir={dir_} spd={spd}")
 
-        # Runway IDs from already-parsed APP procedures
+        # APP procedures have full runway IDs ("28L", "28R") — keep them distinct.
         seen: set = set()
         rwy_ids = []
         for proc in self._proc_procs.get("app", []):
@@ -290,10 +342,33 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
                 seen.add(rwy)
                 rwy_ids.append(rwy)
 
-        if rwy_ids and wind_dir is not None and wind_spd is not None:
-            self.wind_runway_ranking = rank_runways(rwy_ids, wind_dir, wind_spd)
+        if rwy_ids and dir_ is not None and spd is not None:
+            self.wind_runway_ranking = rank_runways(rwy_ids, dir_, spd)
         else:
             self.wind_runway_ranking = []
+
+        # APPs for the best arrival runway (exact match, then numeric fallback)
+        if self.wind_runway_ranking:
+            best_rwy = self.wind_runway_ranking[0][0]       # e.g. "28L"
+            best_num = self._rwy_num(best_rwy)              # e.g. "28"
+            self.arr_recommended_apps = [
+                (proc.display_name, proc.display_runway)
+                for proc in self._proc_procs.get("app", [])
+                if proc.display_runway == best_rwy
+                or (not best_rwy[-1:].isalpha() and
+                    self._rwy_num(proc.display_runway or "") == best_num)
+            ]
+        else:
+            self.arr_recommended_apps = []
+
+        # All available STARs (not runway-specific in CIFP)
+        seen_names: set = set()
+        stars = []
+        for proc in self._proc_procs.get("arr", []):
+            if proc.name not in seen_names:
+                seen_names.add(proc.name)
+                stars.append(proc.display_name)
+        self.arr_recommended_stars = stars
 
     def _cmd_load(self):
         """Load selected plan into FMS, run validation, and refresh wind ranking."""

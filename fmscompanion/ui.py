@@ -905,93 +905,115 @@ class UIMixin:
     # ── WIND tab ──────────────────────────────────────────────────────────────
 
     def _ui_draw_wind(self):
-        dest_icao   = getattr(self, "proc_dest_icao", "") or ""
-        metar_str   = getattr(self, "wind_metar",    "")
-        wind_dir    = getattr(self, "wind_dir",       None)   # float or None (VRB)
-        wind_spd    = getattr(self, "wind_spd",       None)   # float or None
-        ranking     = getattr(self, "wind_runway_ranking", [])
+        dep_icao  = getattr(self, "proc_dep_icao",  "") or ""
+        dest_icao = getattr(self, "proc_dest_icao", "") or ""
 
-        # Header
-        imgui.text_colored("DEST", *_COL_YELLOW)
-        imgui.same_line()
-        imgui.text_colored(f"  {dest_icao or '----'}", *(_COL_CYAN if dest_icao else _COL_GREY))
-        imgui.same_line()
-        if imgui.button("Fetch METAR##wind"):
+        if imgui.button("Fetch Both##windall"):
             self._cmd_wind_refresh()
 
         imgui.separator()
-
-        # METAR string
-        if metar_str:
-            imgui.text_colored(metar_str, *_COL_DIM)
-        else:
-            imgui.text_colored(
-                "No METAR — load a plan, then press Fetch METAR." if not dest_icao
-                else f"No METAR available for {dest_icao}.",
-                *_COL_GREY,
-            )
+        self._ui_wind_section(
+            label="DEP",
+            icao=dep_icao,
+            metar=getattr(self, "dep_wind_metar", ""),
+            wind_dir=getattr(self, "dep_wind_dir",  None),
+            wind_spd=getattr(self, "dep_wind_spd",  None),
+            ranking=getattr(self, "dep_runway_ranking", []),
+            proc_label="Recommended SIDs",
+            procs=getattr(self, "dep_recommended_sids", []),
+            stars=None,
+            fetch_cmd=self._wind_refresh_dep,
+            id_prefix="dep",
+        )
 
         imgui.separator()
+        self._ui_wind_section(
+            label="ARR",
+            icao=dest_icao,
+            metar=getattr(self, "wind_metar", ""),
+            wind_dir=getattr(self, "wind_dir",  None),
+            wind_spd=getattr(self, "wind_spd",  None),
+            ranking=getattr(self, "wind_runway_ranking", []),
+            proc_label="Recommended approaches",
+            procs=getattr(self, "arr_recommended_apps", []),
+            stars=getattr(self, "arr_recommended_stars", []),
+            fetch_cmd=self._wind_refresh_arr,
+            id_prefix="arr",
+        )
 
-        # Parsed wind summary
-        if wind_spd is not None:
-            if wind_spd == 0.0:
-                imgui.text_colored("CALM", *_COL_GREEN)
-            elif wind_dir is None:
-                imgui.text_colored(f"VRB / {wind_spd:.0f} kt  (variable direction)", *_COL_YELLOW)
-            else:
-                imgui.text_colored(
-                    f"{wind_dir:05.1f}\xb0  /  {wind_spd:.0f} kt",
-                    *_COL_WHITE,
-                )
+    def _ui_wind_section(self, label, icao, metar, wind_dir, wind_spd,
+                         ranking, proc_label, procs, stars, fetch_cmd, id_prefix):
+        # Section header
+        imgui.text_colored(label, *_COL_YELLOW)
+        imgui.same_line()
+        imgui.text_colored(f"  {icao or '----'}", *(_COL_CYAN if icao else _COL_GREY))
+        imgui.same_line()
+        if imgui.button(f"Fetch##{id_prefix}fetch"):
+            fetch_cmd()
+
+        # METAR
+        if metar:
+            imgui.text_colored(metar, *_COL_DIM)
+        elif icao:
+            imgui.text_colored(f"No METAR for {icao} - press Fetch.", *_COL_GREY)
         else:
-            if metar_str:
-                imgui.text_colored("Wind not found in METAR", *_COL_GREY)
-            imgui.columns(1)
+            imgui.text_colored("Load a plan to populate airport.", *_COL_GREY)
             return
 
-        imgui.separator()
+        # Wind summary
+        if wind_spd is None:
+            if metar:
+                imgui.text_colored("Wind not found in METAR.", *_COL_GREY)
+            return
+        if wind_spd == 0.0:
+            imgui.text_colored("CALM", *_COL_GREEN)
+        elif wind_dir is None:
+            imgui.text_colored(f"VRB / {wind_spd:.0f} kt", *_COL_YELLOW)
+        else:
+            imgui.text_colored(f"{wind_dir:.0f}\xb0 / {wind_spd:.0f} kt", *_COL_WHITE)
 
-        # Runway ranking table
+        # Runway ranking
         if not ranking:
             if wind_dir is None:
-                imgui.text_colored(
-                    "Cannot rank runways — wind direction is variable.", *_COL_GREY)
+                imgui.text_colored("  Variable wind - cannot rank runways.", *_COL_GREY)
             else:
+                tip = "DEP" if id_prefix == "dep" else "APP"
                 imgui.text_colored(
-                    "No runways found — open APP tab and press Refresh first.", *_COL_GREY)
-            return
-
-        imgui.columns(4, "wind_hdr", border=False)
-        imgui.text_colored("RWY",      *_COL_YELLOW); imgui.next_column()
-        imgui.text_colored("HDG WIND", *_COL_YELLOW); imgui.next_column()
-        imgui.text_colored("X WIND",   *_COL_YELLOW); imgui.next_column()
-        imgui.text_colored("",         *_COL_YELLOW)
-        imgui.columns(1)
-        imgui.separator()
-
-        best_hw = ranking[0][1] if ranking else 0.0
-
-        for rwy, headwind, crosswind in ranking:
-            if headwind == best_hw and headwind > 0:
-                hw_col = _COL_GREEN
-                marker = "\u25b6"   # ▶
-            elif headwind < 0:
-                hw_col = _COL_RED
-                marker = "TW"
-            else:
-                hw_col = _COL_WHITE
-                marker = ""
-
-            imgui.columns(4, f"wind_{rwy}", border=False)
-            imgui.text_colored(rwy,                *_COL_CYAN)
-            imgui.next_column()
-            imgui.text_colored(f"{headwind:+.1f} kt", *hw_col)
-            imgui.next_column()
-            imgui.text_colored(f"{crosswind:.1f} kt",  *_COL_ORANGE)
-            imgui.next_column()
-            imgui.text_colored(marker, *hw_col)
+                    f"  No runways - open {tip} tab and Refresh first.", *_COL_GREY)
+        else:
+            imgui.columns(4, f"{id_prefix}_hdr", border=False)
+            imgui.text_colored("RWY",  *_COL_YELLOW); imgui.next_column()
+            imgui.text_colored("HDGW", *_COL_YELLOW); imgui.next_column()
+            imgui.text_colored("XW",   *_COL_YELLOW); imgui.next_column()
+            imgui.text_colored("",     *_COL_YELLOW)
             imgui.columns(1)
 
-        imgui.separator()
-        imgui.text_colored("Based on reported METAR wind.", *_COL_DIM)
+            best_hw = ranking[0][1]
+            for rwy, headwind, crosswind in ranking:
+                if headwind == best_hw and headwind > 0:
+                    hw_col, marker = _COL_GREEN, ">"
+                elif headwind < 0:
+                    hw_col, marker = _COL_RED, "TW"
+                else:
+                    hw_col, marker = _COL_WHITE, ""
+                imgui.columns(4, f"{id_prefix}_{rwy}", border=False)
+                imgui.text_colored(rwy,                   *_COL_CYAN);   imgui.next_column()
+                imgui.text_colored(f"{headwind:+.1f} kt", *hw_col);      imgui.next_column()
+                imgui.text_colored(f"{crosswind:.1f} kt", *_COL_ORANGE); imgui.next_column()
+                imgui.text_colored(marker,                *hw_col)
+                imgui.columns(1)
+
+        # Procedure recommendations
+        if procs:
+            imgui.text_colored(proc_label + ":", *_COL_YELLOW)
+            for name, rwy in procs:
+                imgui.text_colored(f"  {name}", *_COL_GREEN)
+
+        # STARs (arrival only — not runway-specific in CIFP)
+        if stars is not None:
+            imgui.text_colored("Available STARs:", *_COL_YELLOW)
+            if stars:
+                for name in stars:
+                    imgui.text_colored(f"  {name}", *_COL_WHITE)
+            else:
+                imgui.text_colored("  None - open ARR tab and Refresh first.", *_COL_GREY)

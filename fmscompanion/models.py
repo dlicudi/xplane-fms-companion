@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 
@@ -19,7 +19,6 @@ class FlightPlanInfo:
     waypoint_list: str = ""
     max_altitude: int = 0
     file_timestamp: float = 0.0
-    # File modification time (epoch seconds) for "newest first" sort
     file_mtime: float = 0.0
 
 
@@ -31,6 +30,25 @@ class FlightPlanEntry:
     lat: float
     lon: float
 
+
+# ── Validation ──────────────────────────────────────────────────────────────
+
+# Severity levels — used as plain strings so they compare easily in UI code
+SEVERITY_INFO  = "INFO"
+SEVERITY_WARN  = "WARN"
+SEVERITY_ERROR = "ERROR"
+
+
+@dataclass
+class ValidationIssue:
+    severity: str        # SEVERITY_INFO | SEVERITY_WARN | SEVERITY_ERROR
+    code: str            # e.g. "NO_SID", "DUPLICATE_FIX"
+    message: str         # human-readable one-liner
+    affected_index: int = -1   # 0-based FMS entry index; -1 if not entry-specific
+    suggestion: str = ""       # advisory text shown below the message
+
+
+# ── Procedures ───────────────────────────────────────────────────────────────
 
 @dataclass
 class ProcedureInfo:

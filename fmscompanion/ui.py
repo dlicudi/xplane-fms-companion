@@ -1,11 +1,10 @@
-"""UIMixin — Dear ImGui status/debug window for CockpitdecksFMS.
+"""UIMixin — Dear ImGui plugin window for FMS Companion.
 
-Requires xp_imgui (XPPython3 imgui wrapper) to be installed; gracefully
-disabled if not available.
+Requires xp_imgui (XPPython3 imgui wrapper); gracefully disabled if not available.
 
-Tabs mirror the Loupedeck Live page layout:
+Tabs:
     LOAD     — .fms file browser
-    NAV      — 4×3 live data grid (matches fms_nav.yaml exactly)
+    NAV      — live data grid (WPT, XTK, DTK, GS, ETE, BRG, TRK, ETA)
     ROUTE    — active FMS legs list
     DEP      — SID procedure name browser
     DEP TR   — SID transition browser for selected procedure
@@ -15,18 +14,18 @@ Tabs mirror the Loupedeck Live page layout:
     APP TR   — approach transition browser
 
 Registers a single X-Plane command:
-    cockpitdecks/fms/toggle_window  — show/hide the window
+    fmscompanion/toggle_window  — show/hide the window
 """
 
 try:
     import xp_imgui
     import imgui
-
     _HAS_IMGUI = True
 except ImportError:
     _HAS_IMGUI = False
 
 from XPPython3 import xp
+from fmscompanion.models import SEVERITY_ERROR, SEVERITY_WARN
 
 _TAB_LOAD    = 0
 _TAB_NAV     = 1
@@ -37,8 +36,10 @@ _TAB_ARR     = 5
 _TAB_ARR_TR  = 6
 _TAB_APP     = 7
 _TAB_APP_TR  = 8
+_TAB_CHECK   = 9
+_TAB_FUEL    = 10
 
-_TAB_LABELS = ["LOAD", "NAV", "ROUTE", "DEP", "DEP TR", "ARR", "ARR TR", "APP", "APP TR"]
+_TAB_LABELS = ["LOAD", "NAV", "ROUTE", "DEP", "DEP TR", "ARR", "ARR TR", "APP", "APP TR", "CHECK", "FUEL"]
 
 _PROC_KIND_FOR_TAB  = {_TAB_DEP: "dep", _TAB_ARR: "arr", _TAB_APP: "app"}
 _TRANS_KIND_FOR_TAB = {_TAB_DEP_TR: "dep", _TAB_ARR_TR: "arr", _TAB_APP_TR: "app"}
@@ -70,7 +71,7 @@ _NAV_DREF_NAMES = {
 
 
 class UIMixin:
-    """Mixin providing a Dear ImGui status/debug window for CockpitdecksFMS."""
+    """Mixin providing the Dear ImGui plugin window for FMS Companion."""
 
     def _ui_init(self):
         self._ui_window = None
@@ -83,17 +84,17 @@ class UIMixin:
     def _ui_register_command(self):
         self._create_command(
             "toggle_window",
-            "Toggle Cockpitdecks FMS window",
+            "Toggle FMS Companion window",
             self._ui_toggle_window,
-            prefix="cockpitdecks/fms",
+            prefix="fmscompanion",
         )
 
     def _ui_build_menu(self):
         try:
             plugins_menu = xp.findPluginsMenu()
             self._ui_menu_id = xp.createMenu(
-                "Cockpitdecks FMS", plugins_menu, 0, self._ui_menu_handler, None)
-            xp.appendMenuItem(self._ui_menu_id, "Show / Hide FMS Window", "toggle")
+                "FMS Companion", plugins_menu, 0, self._ui_menu_handler, None)
+            xp.appendMenuItem(self._ui_menu_id, "Show / Hide FMS Companion Window", "toggle")
         except Exception as exc:
             self._log("UI: failed to create menu:", exc)
 
@@ -123,7 +124,7 @@ class UIMixin:
                 refCon=None,
                 visible=1,
             )
-            self._ui_window.setTitle("Cockpitdecks FMS")
+            self._ui_window.setTitle("FMS Companion")
         except Exception as exc:
             self._log("UI: failed to create window:", exc)
 
@@ -164,16 +165,38 @@ class UIMixin:
         imgui.separator()
 
         # Tab bar
+        issues = getattr(self, "validation_issues", [])
         for i, label in enumerate(_TAB_LABELS):
             if i > 0:
                 imgui.same_line()
             active = self._ui_tab == i
+
+            # CHECK tab: show count and tint by worst severity
+            if i == _TAB_CHECK and issues:
+                severities = {v.severity for v in issues}
+                if SEVERITY_ERROR in severities:
+                    btn_col = (0.7, 0.1, 0.1, 1.0)
+                    hov_col = (0.8, 0.2, 0.2, 1.0)
+                elif SEVERITY_WARN in severities:
+                    btn_col = (0.55, 0.35, 0.0, 1.0)
+                    hov_col = (0.65, 0.45, 0.0, 1.0)
+                else:
+                    btn_col, hov_col = _COL_BLUE, _COL_BLUE_HOV
+                tab_label = f"CHECK {len(issues)}##tab{i}"
+            else:
+                btn_col, hov_col = _COL_BLUE, _COL_BLUE_HOV
+                tab_label = f"{label}##tab{i}"
+
             if active:
-                imgui.push_style_color(imgui.COLOR_BUTTON, *_COL_BLUE)
-                imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, *_COL_BLUE_HOV)
-            if imgui.button(f"{label}##tab{i}"):
+                imgui.push_style_color(imgui.COLOR_BUTTON, *btn_col)
+                imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, *hov_col)
+            else:
+                if i == _TAB_CHECK and issues:
+                    imgui.push_style_color(imgui.COLOR_BUTTON, *btn_col)
+                    imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, *hov_col)
+            if imgui.button(tab_label):
                 self._ui_tab = i
-            if active:
+            if active or (i == _TAB_CHECK and issues):
                 imgui.pop_style_color(2)
 
         imgui.separator()
@@ -184,12 +207,16 @@ class UIMixin:
             self._ui_draw_nav()
         elif self._ui_tab == _TAB_ROUTE:
             self._ui_draw_route()
+        elif self._ui_tab == _TAB_CHECK:
+            self._ui_draw_check()
+        elif self._ui_tab == _TAB_FUEL:
+            self._ui_draw_fuel()
         elif self._ui_tab in _PROC_KIND_FOR_TAB:
             self._ui_draw_proc_names(_PROC_KIND_FOR_TAB[self._ui_tab])
         elif self._ui_tab in _TRANS_KIND_FOR_TAB:
             self._ui_draw_proc_trans(_TRANS_KIND_FOR_TAB[self._ui_tab])
 
-    # ── NAV tab — 4×3 grid matching fms_nav.yaml ──────────────────────────────
+    # ── NAV tab ───────────────────────────────────────────────────────────────
 
     def _ui_ensure_nav_drefs(self):
         if self._nav_drefs:
@@ -213,14 +240,13 @@ class UIMixin:
     def _ui_draw_nav(self):
         self._ui_ensure_nav_drefs()
 
-        # helpers
         def fmtf(key, fmt, suffix=""):
             v = self._nav_getf(key)
             return f"{fmt.format(v)}{suffix}"
 
         dst_nm = self.float_values.get("loaded_distance_nm", 0.0)
 
-        # ── Row 1: DIS | ETE | GS | DTK ──────────────────────────────────────
+        # Row 1: DIS | ETE | GS | DTK
         imgui.columns(4, "nav_r1", border=True)
 
         imgui.text_colored("DIS", *_COL_YELLOW)
@@ -242,7 +268,7 @@ class UIMixin:
         imgui.columns(1)
         imgui.separator()
 
-        # ── Row 2: WPT | ETA | BRG | XTK ─────────────────────────────────────
+        # Row 2: WPT | ETA | BRG | XTK
         imgui.columns(4, "nav_r2", border=True)
 
         imgui.text_colored("WPT", *_COL_YELLOW)
@@ -265,7 +291,7 @@ class UIMixin:
         imgui.columns(1)
         imgui.separator()
 
-        # ── Row 3: TRK | DEST | DTO | SRC ────────────────────────────────────
+        # Row 3: TRK | DEST | DTO | MAP
         imgui.columns(4, "nav_r3", border=True)
 
         imgui.text_colored("TRK", *_COL_YELLOW)
@@ -282,10 +308,19 @@ class UIMixin:
             self._cmd_legs_direct_to()
         imgui.next_column()
 
-        imgui.text_colored("SRC", *_COL_YELLOW)
-        imgui.text_colored("GPS", *_COL_GREEN)
+        imgui.text_colored("MAP", *_COL_YELLOW)
+        map_label = self.map_mode_names[self.map_mode] if self.map_mode_names else "G1000"
+        if imgui.button(f"{map_label}##maptog"):
+            self._cmd_map_toggle()
 
         imgui.columns(1)
+
+        # Advisory banner — shown only when there are active advisories
+        advisories = getattr(self, "nav_advisories", [])
+        if advisories:
+            imgui.separator()
+            for msg in advisories:
+                imgui.text_colored(f"\u26a0  {msg}", *_COL_RED)
 
     # ── LOAD tab ───────────────────────────────────────────────────────────────
 
@@ -326,7 +361,6 @@ class UIMixin:
             imgui.text_colored("No flight plans found", *_COL_GREY)
             return
 
-        # Header: matches fms_load.yaml columns — FPL | WPTS | MAX ALT | DIS
         imgui.columns(4, "load_hdr", border=False)
         imgui.text_colored("FPL", *_COL_YELLOW)
         imgui.next_column()
@@ -345,11 +379,11 @@ class UIMixin:
             if not fn:
                 imgui.text("")
                 continue
-            is_sel   = r.get("is_selected", 0)
-            wpts     = r.get("wpt_count", 0)
-            max_alt  = r.get("max_alt_ft", 0)
-            dist     = int(round(r.get("distance_nm", 0.0)))
-            col      = _COL_ORANGE if not is_sel else _COL_WHITE
+            is_sel  = r.get("is_selected", 0)
+            wpts    = r.get("wpt_count", 0)
+            max_alt = r.get("max_alt_ft", 0)
+            dist    = int(round(r.get("distance_nm", 0.0)))
+            col     = _COL_ORANGE if not is_sel else _COL_WHITE
 
             imgui.columns(4, f"load_r{row}", border=False)
             imgui.push_style_color(imgui.COLOR_TEXT, *col)
@@ -393,7 +427,7 @@ class UIMixin:
                 if imgui.button("LOAD INTO FMS"):
                     self._cmd_load()
 
-    # ── ROUTE tab (mirrors fms_fpl.yaml) ──────────────────────────────────────
+    # ── ROUTE tab ─────────────────────────────────────────────────────────────
 
     def _ui_draw_route(self):
         count = self._read_fms_entry_count()
@@ -415,7 +449,6 @@ class UIMixin:
 
         imgui.separator()
 
-        # Columns match fms_fpl.yaml: # | WPT | ALT | (scroll)
         imgui.columns(4, "route_hdr", border=False)
         imgui.text_colored("#", *_COL_YELLOW)
         imgui.next_column()
@@ -432,8 +465,8 @@ class UIMixin:
             if idx < 0:
                 imgui.text("")
                 continue
-            ident    = self._legs_read_row_ident(row) or "---"
-            alt      = self._legs_read_row_alt(row)
+            ident     = self._legs_read_row_ident(row) or "---"
+            alt       = self._legs_read_row_alt(row)
             is_active = self._legs_read_row_is_active(row)
             is_sel    = self._legs_read_row_is_selected(row)
 
@@ -518,13 +551,12 @@ class UIMixin:
             imgui.text_colored(f"  DEP: {self.proc_dep_icao or '?'}   DEST: {self.proc_dest_icao or '?'}", *_COL_DIM)
             return
 
-        # Columns match fms_proc_dep.yaml: # | SID | RWY | UP/SEL/DN
         imgui.columns(4, f"{kind}_hdr", border=False)
         imgui.text_colored("#", *_COL_YELLOW)
         imgui.next_column()
         imgui.text_colored(label, *_COL_YELLOW)
         imgui.next_column()
-        imgui.text_colored("", *_COL_YELLOW)   # no RWY at name level
+        imgui.text_colored("", *_COL_YELLOW)
         imgui.next_column()
         if page_str:
             imgui.text_colored(page_str, *_COL_DIM)
@@ -573,7 +605,6 @@ class UIMixin:
         idx       = self._proc_index.get(kind, -1)
         page_str  = self._proc_trans_list_page_str(kind)
 
-        # Breadcrumb: SID > RNAV1  [Back]
         imgui.text_colored(label, *_COL_YELLOW)
         if sel_name:
             imgui.same_line()
@@ -597,7 +628,6 @@ class UIMixin:
             imgui.text_colored(f"No transitions for {sel_name}", *_COL_GREY)
             return
 
-        # Columns: # | NAME | RWY | UP/SEL/DN
         imgui.columns(4, f"{kind}tr_hdr", border=False)
         imgui.text_colored("#", *_COL_YELLOW)
         imgui.next_column()
@@ -653,3 +683,178 @@ class UIMixin:
             imgui.same_line()
             if imgui.button(f"Clear##{kind}_clr"):
                 self._cmd_proc_clear_selected(kind)
+
+    # ── CHECK tab ─────────────────────────────────────────────────────────────
+
+    def _ui_draw_check(self):
+        issues = getattr(self, "validation_issues", [])
+
+        loaded_fn = self.string_values.get("loaded_filename", "")
+        if loaded_fn:
+            imgui.text_colored(f"Plan: {loaded_fn}", *_COL_DIM)
+        else:
+            imgui.text_colored("No plan loaded — load a plan first.", *_COL_GREY)
+
+        imgui.same_line()
+        if imgui.button("Re-check##chk"):
+            self._run_validation()
+
+        imgui.separator()
+
+        if not issues:
+            if loaded_fn:
+                imgui.text_colored("\u2713  No issues found.", *_COL_GREEN)
+            return
+
+        # Summary line
+        n_err  = sum(1 for v in issues if v.severity == SEVERITY_ERROR)
+        n_warn = sum(1 for v in issues if v.severity == SEVERITY_WARN)
+        n_info = sum(1 for v in issues if v.severity == "INFO")
+        parts = []
+        if n_err:
+            parts.append(f"{n_err} error{'s' if n_err > 1 else ''}")
+        if n_warn:
+            parts.append(f"{n_warn} warning{'s' if n_warn > 1 else ''}")
+        if n_info:
+            parts.append(f"{n_info} info")
+        summary_col = _COL_RED if n_err else (_COL_YELLOW if n_warn else _COL_DIM)
+        imgui.text_colored(", ".join(parts), *summary_col)
+        imgui.separator()
+
+        _SEV_COL = {
+            SEVERITY_ERROR: _COL_RED,
+            SEVERITY_WARN:  _COL_YELLOW,
+            "INFO":         _COL_DIM,
+        }
+
+        for i, issue in enumerate(issues):
+            col = _SEV_COL.get(issue.severity, _COL_WHITE)
+            # Badge + message on one line
+            imgui.text_colored(f"[{issue.severity}]", *col)
+            imgui.same_line()
+            imgui.text_colored(f"  {issue.message}", *_COL_WHITE)
+            # Suggestion indented below
+            if issue.suggestion:
+                imgui.text_colored(f"    \u2192 {issue.suggestion}", *_COL_DIM)
+            # Jump-to button for entry-specific issues
+            if issue.affected_index >= 0:
+                if imgui.button(f"Go to #{issue.affected_index + 1}##chk{i}"):
+                    count = self._read_fms_entry_count()
+                    if 0 <= issue.affected_index < count:
+                        self.legs_selected    = issue.affected_index
+                        self.legs_window_start = (
+                            issue.affected_index // self.LEGS_VISIBLE_ROWS
+                        ) * self.LEGS_VISIBLE_ROWS
+                        self._ui_tab = _TAB_ROUTE
+            if i < len(issues) - 1:
+                imgui.separator()
+
+    # ── FUEL tab ──────────────────────────────────────────────────────────────
+
+    def _ui_draw_fuel(self):
+        _KG_TO_LB = 2.20462
+
+        fuel_kg  = getattr(self, "fuel_on_board_kg", 0.0)
+        flow_kgs = getattr(self, "fuel_flow_kg_s",   0.0)
+        fuel_lb  = fuel_kg * _KG_TO_LB
+
+        # ── Fuel on board ──────────────────────────────────────────────────
+        imgui.columns(2, "fuel_fob", border=True)
+        imgui.text_colored("FUEL ON BOARD", *_COL_YELLOW)
+        imgui.next_column()
+        if fuel_kg > 0:
+            imgui.text_colored(f"{fuel_kg:.0f} kg  /  {fuel_lb:.0f} lb", *_COL_GREEN)
+        else:
+            imgui.text_colored("-- kg", *_COL_GREY)
+        imgui.columns(1)
+        imgui.separator()
+
+        # ── Burn rate ──────────────────────────────────────────────────────
+        flow_kgh = flow_kgs * 3600.0
+        flow_lbh = flow_kgh * _KG_TO_LB
+
+        imgui.columns(2, "fuel_flow", border=True)
+        imgui.text_colored("BURN RATE", *_COL_YELLOW)
+        imgui.next_column()
+        if flow_kgh > 0:
+            imgui.text_colored(f"{flow_kgh:.0f} kg/hr  /  {flow_lbh:.0f} lb/hr", *_COL_ORANGE)
+        else:
+            imgui.text_colored("-- kg/hr  (engines off or no data)", *_COL_GREY)
+        imgui.columns(1)
+        imgui.separator()
+
+        # ── Endurance ──────────────────────────────────────────────────────
+        imgui.columns(2, "fuel_endur", border=True)
+        imgui.text_colored("ENDURANCE", *_COL_YELLOW)
+        imgui.next_column()
+        if fuel_kg > 0 and flow_kgs > 0:
+            endur_s   = fuel_kg / flow_kgs
+            endur_h   = int(endur_s // 3600)
+            endur_m   = int((endur_s % 3600) // 60)
+            endur_col = _COL_RED if endur_h < 1 else (_COL_YELLOW if endur_h < 2 else _COL_GREEN)
+            imgui.text_colored(f"{endur_h:d}:{endur_m:02d}  (hr:min until exhaustion)", *endur_col)
+        elif fuel_kg > 0:
+            imgui.text_colored("-- (engines off or no flow data)", *_COL_GREY)
+        else:
+            imgui.text_colored("-- (no fuel data)", *_COL_GREY)
+        imgui.columns(1)
+        imgui.separator()
+
+        # ── GS-based ETE to destination ────────────────────────────────────
+        self._ui_ensure_nav_drefs()
+        gs_kt   = self._nav_getf("gs")
+        dst_nm  = self.float_values.get("loaded_distance_nm", 0.0)
+
+        imgui.columns(2, "fuel_ete", border=True)
+        imgui.text_colored("PLAN DIST", *_COL_YELLOW)
+        imgui.next_column()
+        if dst_nm > 0:
+            imgui.text_colored(f"{dst_nm:.0f} nm  (loaded plan total)", *_COL_DIM)
+        else:
+            imgui.text_colored("-- nm  (no plan loaded)", *_COL_GREY)
+        imgui.columns(1)
+
+        imgui.columns(2, "fuel_gs_ete", border=True)
+        imgui.text_colored("GS / ETE DEST", *_COL_YELLOW)
+        imgui.next_column()
+        if gs_kt >= 40.0 and dst_nm > 0:
+            ete_h  = dst_nm / gs_kt
+            ete_hr = int(ete_h)
+            ete_m  = int((ete_h - ete_hr) * 60)
+            imgui.text_colored(
+                f"{gs_kt:.0f} kt   ETE {ete_hr}:{ete_m:02d}  (plan dist / GS, advisory)",
+                *_COL_DIM,
+            )
+        elif gs_kt < 40.0:
+            imgui.text_colored(f"{gs_kt:.0f} kt  (on ground)", *_COL_GREY)
+        else:
+            imgui.text_colored("--", *_COL_GREY)
+        imgui.columns(1)
+        imgui.separator()
+
+        # ── Fuel at destination (endurance - ETE) ─────────────────────────
+        imgui.columns(2, "fuel_dest", border=True)
+        imgui.text_colored("FUEL AT DEST", *_COL_YELLOW)
+        imgui.next_column()
+        if gs_kt >= 40.0 and dst_nm > 0 and flow_kgs > 0:
+            ete_h       = dst_nm / gs_kt
+            burn_kg     = flow_kgs * ete_h * 3600.0
+            remain_kg   = fuel_kg - burn_kg
+            remain_lb   = remain_kg * _KG_TO_LB
+            dest_col    = _COL_RED if remain_kg < 0 else (_COL_YELLOW if remain_kg < 50 else _COL_GREEN)
+            if remain_kg < 0:
+                imgui.text_colored("INSUFFICIENT FUEL FOR ROUTE (advisory)", *_COL_RED)
+            else:
+                imgui.text_colored(
+                    f"{remain_kg:.0f} kg  /  {remain_lb:.0f} lb  (advisory only)",
+                    *dest_col,
+                )
+        else:
+            imgui.text_colored("-- (need GS, plan distance, and fuel flow)", *_COL_GREY)
+        imgui.columns(1)
+
+        imgui.separator()
+        imgui.text_colored(
+            "Advisory only — based on plan total distance and current GS/burn rate.",
+            *_COL_DIM,
+        )

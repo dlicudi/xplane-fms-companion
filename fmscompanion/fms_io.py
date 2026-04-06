@@ -7,7 +7,7 @@ from typing import List, Optional
 
 from XPPython3 import xp
 
-from cockpitdecksfms.models import FlightPlanEntry, FlightPlanInfo
+from fmscompanion.models import FlightPlanEntry, FlightPlanInfo
 
 
 class FmsIOMixin:
@@ -286,7 +286,7 @@ class FmsIOMixin:
     # ── Plan navigation commands ──
 
     def _cmd_previous(self):
-        """E1 CCW: select previous plan within current visible page only."""
+        """Select previous plan within current visible page only."""
         if not self.plans:
             self._set_status("EMPTY")
             self._invalidate_list_cache()
@@ -311,7 +311,7 @@ class FmsIOMixin:
         self._publish_state()
 
     def _cmd_next(self):
-        """E1 CW: select next plan within current visible page only."""
+        """Select next plan within current visible page only."""
         if not self.plans:
             self._set_status("EMPTY")
             self._invalidate_list_cache()

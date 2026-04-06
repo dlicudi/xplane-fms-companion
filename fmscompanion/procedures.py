@@ -3,9 +3,6 @@
 Two independent views per kind (dep/arr/app):
   - Name list  (dep/list_row_N_*)  : always shows procedure names; tap to select/highlight.
   - Trans list (dep/trans_row_N_*) : always shows transitions for the selected name.
-
-The two deck pages (DEP and DEP TR) each bind to their own set of datarefs so they
-remain independent — selecting a name on DEP does NOT transform that page.
 """
 
 import os
@@ -13,7 +10,7 @@ from typing import Dict, List, Optional
 
 from XPPython3 import xp
 
-from cockpitdecksfms.models import ProcedureInfo
+from fmscompanion.models import ProcedureInfo
 
 
 class ProceduresMixin:
@@ -116,8 +113,6 @@ class ProceduresMixin:
             ))
 
         # Deduplicate APP entries: one per proc_name, preferring a non-blank transition (IAF)
-        raw_app_count = sum(1 for p in procedures if p.proc_type == "APP")
-        self._log("CIFP pre-dedup APP count:", raw_app_count, "for", icao)
         app_rep: Dict[str, ProcedureInfo] = {}
         for p in procedures:
             if p.proc_type != "APP":
@@ -142,9 +137,6 @@ class ProceduresMixin:
         for p in procedures:
             by_type[p.proc_type] = by_type.get(p.proc_type, 0) + 1
         self._log("CIFP parsed", icao, "->", len(procedures), "procedures", by_type)
-        for p in procedures:
-            if p.proc_type == "APP":
-                self._log("  APP:", p.display_name, "trans=", p.transition, "wpts=", len(p.waypoints))
         return procedures
 
     # ── Procedure state helpers ──
@@ -254,7 +246,6 @@ class ProceduresMixin:
     # ── Name-list cache ──
 
     def _proc_ensure_cache(self, kind: str) -> None:
-        """Render the procedure name list. Always shows names regardless of selection state."""
         if self._proc_cache_valid.get(kind, False):
             return
         rows: Dict[int, Dict[str, object]] = {}
@@ -282,7 +273,6 @@ class ProceduresMixin:
     # ── Trans-list cache ──
 
     def _proc_ensure_trans_cache(self, kind: str) -> None:
-        """Render the transition list for the selected procedure name."""
         if self._proc_trans_cache_valid.get(kind, False):
             return
         rows: Dict[int, Dict[str, object]] = {}
@@ -393,110 +383,6 @@ class ProceduresMixin:
                   "arr(STAR)", len(self._proc_procs["arr"]),
                   "app(APP)", len(self._proc_procs["app"]))
 
-    # ── Section dataref and command registration ──
-
-    def _proc_register_section(self, kind: str, dref_prefix: str, cmd_prefix: str) -> None:
-        p = dref_prefix
-        c = cmd_prefix
-
-        # ── Shared datarefs ──
-        self._register_live_string_dref("airport", lambda k=kind: self._proc_airport_for(k), prefix=p)
-        self._register_live_string_dref("status", lambda k=kind: self._proc_status.get(k, ""), prefix=p)
-        self._register_live_string_dref("loaded_name", lambda k=kind: self._proc_loaded.get(k, ""), prefix=p)
-        self._register_live_string_dref("selected_proc_name", lambda k=kind: self._proc_selected_proc_name(k), prefix=p)
-
-        # ── Name-list datarefs ──
-        self._register_live_string_dref("list_page", lambda k=kind: self._proc_name_list_page_str(k), prefix=p)
-        self._register_live_string_dref("list_sel_count", lambda k=kind: self._proc_name_sel_count_str(k), prefix=p)
-        self._register_live_int_dref("list_window_page", lambda k=kind: self._proc_name_window_page(k), prefix=p)
-        self._register_live_int_dref("name_count", lambda k=kind: len(self._proc_names.get(k, [])), prefix=p)
-        self._register_live_int_dref(
-            "name_index",
-            lambda k=kind: (self._proc_name_idx.get(k, -1) + 1) if self._proc_name_idx.get(k, -1) >= 0 else 0,
-            prefix=p)
-        for row in range(1, self.PROC_VISIBLE_ROWS + 1):
-            self._register_live_string_dref(
-                f"list_row_{row}_name", lambda k=kind, r=row: self._proc_read_row_str(k, r, "name"), prefix=p)
-            self._register_live_string_dref(
-                f"list_row_{row}_runway", lambda k=kind, r=row: self._proc_read_row_str(k, r, "runway"), prefix=p)
-            self._register_live_string_dref(
-                f"list_row_{row}_index", lambda k=kind, r=row: self._proc_read_row_str(k, r, "index"), prefix=p)
-            self._register_live_string_dref(
-                f"list_row_{row}_status", lambda k=kind, r=row: self._proc_read_row_str(k, r, "status"), prefix=p)
-            self._register_live_int_dref(
-                f"list_row_{row}_is_selected",
-                lambda k=kind, r=row: self._proc_read_row_int(k, r, "is_selected"),
-                prefix=p)
-
-        # ── Trans-list datarefs ──
-        self._register_live_string_dref("trans_list_page", lambda k=kind: self._proc_trans_list_page_str(k), prefix=p)
-        self._register_live_string_dref("trans_list_sel_count", lambda k=kind: self._proc_trans_sel_count_str(k), prefix=p)
-        self._register_live_string_dref("selected_name", lambda k=kind: self._proc_selected_name(k), prefix=p)
-        self._register_live_string_dref("selected_runway", lambda k=kind: self._proc_selected_runway(k), prefix=p)
-        self._register_live_int_dref("trans_list_window_page", lambda k=kind: self._proc_trans_window_page(k), prefix=p)
-        self._register_live_int_dref("trans_count", lambda k=kind: len(self._proc_transitions(k)), prefix=p)
-        self._register_live_int_dref(
-            "index",
-            lambda k=kind: (self._proc_index.get(k, -1) + 1) if self._proc_index.get(k, -1) >= 0 else 0,
-            prefix=p)
-        for row in range(1, self.PROC_VISIBLE_ROWS + 1):
-            self._register_live_string_dref(
-                f"trans_row_{row}_name", lambda k=kind, r=row: self._proc_read_trans_row_str(k, r, "name"), prefix=p)
-            self._register_live_string_dref(
-                f"trans_row_{row}_runway", lambda k=kind, r=row: self._proc_read_trans_row_str(k, r, "runway"), prefix=p)
-            self._register_live_string_dref(
-                f"trans_row_{row}_index", lambda k=kind, r=row: self._proc_read_trans_row_str(k, r, "index"), prefix=p)
-            self._register_live_string_dref(
-                f"trans_row_{row}_status", lambda k=kind, r=row: self._proc_read_trans_row_str(k, r, "status"), prefix=p)
-            self._register_live_int_dref(
-                f"trans_row_{row}_is_selected",
-                lambda k=kind, r=row: self._proc_read_trans_row_int(k, r, "is_selected"),
-                prefix=p)
-
-        # ── Name-list commands ──
-        self._create_command("scroll_up", f"Scroll {kind} name list up",
-                             lambda k=kind: self._cmd_proc_scroll_up(k), prefix=c)
-        self._create_command("scroll_down", f"Scroll {kind} name list down",
-                             lambda k=kind: self._cmd_proc_scroll_down(k), prefix=c)
-        self._create_command("select_row_1", f"Select {kind} name row 1",
-                             lambda k=kind: self._cmd_proc_select_row(k, 1), prefix=c)
-        self._create_command("select_row_2", f"Select {kind} name row 2",
-                             lambda k=kind: self._cmd_proc_select_row(k, 2), prefix=c)
-        self._create_command("select_row_3", f"Select {kind} name row 3",
-                             lambda k=kind: self._cmd_proc_select_row(k, 3), prefix=c)
-        self._create_command("previous", f"Select previous {kind} name",
-                             lambda k=kind: self._cmd_proc_previous(k), prefix=c)
-        self._create_command("next", f"Select next {kind} name",
-                             lambda k=kind: self._cmd_proc_next(k), prefix=c)
-        self._create_command("clear_name", f"Clear {kind} name selection",
-                             lambda k=kind: self._cmd_proc_clear_name(k), prefix=c)
-
-        # ── Trans-list commands ──
-        self._create_command("trans_scroll_up", f"Scroll {kind} transition list up",
-                             lambda k=kind: self._cmd_proc_trans_scroll_up(k), prefix=c)
-        self._create_command("trans_scroll_down", f"Scroll {kind} transition list down",
-                             lambda k=kind: self._cmd_proc_trans_scroll_down(k), prefix=c)
-        self._create_command("select_trans_row_1", f"Select {kind} transition row 1",
-                             lambda k=kind: self._cmd_proc_select_trans_row(k, 1), prefix=c)
-        self._create_command("select_trans_row_2", f"Select {kind} transition row 2",
-                             lambda k=kind: self._cmd_proc_select_trans_row(k, 2), prefix=c)
-        self._create_command("select_trans_row_3", f"Select {kind} transition row 3",
-                             lambda k=kind: self._cmd_proc_select_trans_row(k, 3), prefix=c)
-        self._create_command("trans_previous", f"Select previous {kind} transition",
-                             lambda k=kind: self._cmd_proc_trans_previous(k), prefix=c)
-        self._create_command("trans_next", f"Select next {kind} transition",
-                             lambda k=kind: self._cmd_proc_trans_next(k), prefix=c)
-        self._create_command("clear_selected", f"Clear {kind} transition selection",
-                             lambda k=kind: self._cmd_proc_clear_selected(k), prefix=c)
-
-        # ── Shared commands ──
-        self._create_command("activate", f"Insert selected {kind} procedure into FMS",
-                             lambda k=kind: self._cmd_proc_activate(k), prefix=c)
-        self._create_command("refresh", f"Reload {kind} procedures from CIFP",
-                             lambda k=kind: self._cmd_proc_refresh(k), prefix=c)
-        self._create_command("back", f"Clear {kind} name selection (back to name list)",
-                             lambda k=kind: self._cmd_proc_back(k), prefix=c)
-
     # ── Commands — name list ──
 
     def _cmd_proc_back(self, kind: str) -> None:
@@ -516,7 +402,6 @@ class ProceduresMixin:
         if new_start != w:
             self._proc_name_window[kind] = new_start
             self._proc_invalidate_cache(kind)
-            self._log(f"proc_scroll_up({kind}) ->", new_start)
 
     def _cmd_proc_scroll_down(self, kind: str) -> None:
         names = self._proc_names.get(kind, [])
@@ -529,7 +414,6 @@ class ProceduresMixin:
         if new_start != w:
             self._proc_name_window[kind] = new_start
             self._proc_invalidate_cache(kind)
-            self._log(f"proc_scroll_down({kind}) ->", new_start)
 
     def _cmd_proc_select_row(self, kind: str, row: int) -> None:
         """Select (highlight) a procedure name. Does not drill in — stays on name list."""
@@ -539,7 +423,6 @@ class ProceduresMixin:
         if not names or pi < 0 or pi >= len(names):
             return
         self._proc_name_idx[kind] = pi
-        # Reset transition state for the newly selected name
         self._proc_index[kind] = -1
         self._proc_window[kind] = 0
         self._proc_invalidate_both(kind)
@@ -549,16 +432,13 @@ class ProceduresMixin:
         if len(transitions) == 1:
             self._proc_index[kind] = 0
             self._proc_invalidate_trans_cache(kind)
-            self._log(f"proc_select_row({kind}) auto-selected sole transition")
 
     def _cmd_proc_previous(self, kind: str) -> None:
-        """Scroll the name list window up by one row."""
         w = self._proc_name_window.get(kind, 0)
         self._proc_name_window[kind] = max(0, w - 1)
         self._proc_invalidate_cache(kind)
 
     def _cmd_proc_next(self, kind: str) -> None:
-        """Scroll the name list window down by one row."""
         names = self._proc_names.get(kind, [])
         n = len(names)
         w = self._proc_name_window.get(kind, 0)
@@ -567,10 +447,8 @@ class ProceduresMixin:
         self._proc_invalidate_cache(kind)
 
     def _cmd_proc_clear_name(self, kind: str) -> None:
-        """Clear the name selection without changing the transition window."""
         self._proc_name_idx[kind] = -1
         self._proc_invalidate_both(kind)
-        self._log(f"proc_clear_name({kind})")
 
     # ── Commands — transition list ──
 
@@ -584,7 +462,6 @@ class ProceduresMixin:
             self._proc_window[kind] = new_start
             self._proc_index[kind] = -1
             self._proc_invalidate_trans_cache(kind)
-            self._log(f"proc_trans_scroll_up({kind}) ->", new_start)
 
     def _cmd_proc_trans_scroll_down(self, kind: str) -> None:
         transitions = self._proc_transitions(kind)
@@ -598,7 +475,6 @@ class ProceduresMixin:
             self._proc_window[kind] = new_start
             self._proc_index[kind] = -1
             self._proc_invalidate_trans_cache(kind)
-            self._log(f"proc_trans_scroll_down({kind}) ->", new_start)
 
     def _cmd_proc_select_trans_row(self, kind: str, row: int) -> None:
         transitions = self._proc_transitions(kind)
@@ -608,7 +484,7 @@ class ProceduresMixin:
             return
         self._proc_index[kind] = pi
         self._proc_invalidate_trans_cache(kind)
-        self._log(f"proc_select_trans_row({kind}, {row}) -> transition index={pi}")
+        self._log(f"proc_select_trans_row({kind}, {row}) -> index={pi}")
 
     def _cmd_proc_trans_previous(self, kind: str) -> None:
         transitions = self._proc_transitions(kind)
@@ -619,7 +495,6 @@ class ProceduresMixin:
         end = min(w + self.PROC_VISIBLE_ROWS, len(transitions))
         self._proc_index[kind] = (end - 1) if (idx < w or idx >= end) else max(w, idx - 1)
         self._proc_invalidate_trans_cache(kind)
-        self._log(f"proc_trans_previous({kind}) -> index={self._proc_index[kind]}")
 
     def _cmd_proc_trans_next(self, kind: str) -> None:
         transitions = self._proc_transitions(kind)
@@ -630,12 +505,10 @@ class ProceduresMixin:
         end = min(w + self.PROC_VISIBLE_ROWS, len(transitions))
         self._proc_index[kind] = w if (idx < w or idx >= end) else min(end - 1, idx + 1)
         self._proc_invalidate_trans_cache(kind)
-        self._log(f"proc_trans_next({kind}) -> index={self._proc_index[kind]}")
 
     def _cmd_proc_clear_selected(self, kind: str) -> None:
         self._proc_index[kind] = -1
         self._proc_invalidate_trans_cache(kind)
-        self._log(f"proc_clear_selected({kind})")
 
     def _cmd_proc_refresh(self, kind: str) -> None:
         self._cifp_cache.clear()

@@ -4,22 +4,9 @@ from XPPython3 import xp
 
 
 class FmsStateMixin:
-    """Mixin providing live FMS state datarefs and waypoint/map range commands."""
+    """Mixin providing live FMS state reads and waypoint/map range commands."""
 
-    # ── Live FMS state datarefs ──
-
-    def _register_live_fms_drefs(self):
-        self._register_live_int_dref("fms_entry_count", self._read_fms_entry_count)
-        self._register_live_int_dref("fms_active_index", self._read_fms_active_index)
-        self._register_live_int_dref("fms_active_altitude", self._read_fms_active_altitude)
-        self._register_live_int_dref("fms_displayed_index", self._read_fms_displayed_index)
-        self._register_live_int_dref("fms_displayed_altitude", self._read_fms_displayed_altitude)
-        self._register_live_string_dref("fms_active_ident", self._read_fms_active_ident)
-        self._register_live_string_dref("fms_displayed_ident", self._read_fms_displayed_ident)
-        self._register_live_string_dref("fms_first_ident", self._read_fms_first_ident)
-        self._register_live_int_dref("fms_first_altitude", self._read_fms_first_altitude)
-        self._register_live_string_dref("fms_last_ident", self._read_fms_last_ident)
-        self._register_live_int_dref("fms_last_altitude", self._read_fms_last_altitude)
+    # ── Live FMS state readers ──
 
     def _safe_fms_entry_info(self, index: int):
         try:
@@ -153,7 +140,7 @@ class FmsStateMixin:
             if hasattr(xp, "setDirectToFMSFlightPlanEntry"):
                 xp.setDirectToFMSFlightPlanEntry(fp, displayed)
             else:
-                self._log("wp_direct: API xp.setDirectToFMSFlightPlanEntry not available (XP12 feature)")
+                self._log("wp_direct: setDirectToFMSFlightPlanEntry not available (XP12 only)")
                 return
             info = self._safe_fms_entry_info(displayed)
             ident = info.navAidID if info else "?"

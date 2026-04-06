@@ -1,87 +1,10 @@
-"""LegsMixin — scrollable LEGS list: datarefs, commands, and state management."""
+"""LegsMixin — scrollable LEGS list: state management and commands."""
 
 from XPPython3 import xp
 
 
 class LegsMixin:
     """Mixin providing the LEGS scrollable waypoint list."""
-
-    # ── Dataref and command registration ──
-
-    def _register_writable_legs_window_start(self, prefix: str = None):
-        """Register writable window_start: write 1-based PAGE number (1=rows 1-3, 2=4-6, ...)."""
-        p = prefix or self.LEGS_DREF_PREFIX
-        name = f"{p}/window_start"
-
-        def read_int(refCon):
-            count = self._read_fms_entry_count()
-            if count <= 0:
-                return 1
-            return self.legs_window_start // self.LEGS_VISIBLE_ROWS + 1
-
-        def write_int(refCon, value):
-            try:
-                page = max(1, int(value))
-            except (TypeError, ValueError):
-                page = 1
-            count = self._read_fms_entry_count()
-            if count <= 0:
-                return
-            max_start = max(0, count - 1)
-            new_start = (page - 1) * self.LEGS_VISIBLE_ROWS
-            self.legs_window_start = max(0, min(max_start, new_start))
-            self.legs_selected = -1
-            self._log("window_start write: page", page, "-> window", self.legs_window_start)
-
-        accessor = xp.registerDataAccessor(
-            name,
-            dataType=xp.Type_Int,
-            writable=1,
-            readInt=read_int,
-            writeInt=write_int,
-            readRefCon=None,
-            writeRefCon=None,
-        )
-        self.accessors.append(accessor)
-        self._log("Registered writable legs window_start dataref", name, "->", accessor)
-
-    def _register_legs_drefs(self):
-        p = self.LEGS_DREF_PREFIX
-        self._register_live_int_dref("selected_index", self._legs_read_selected_index, prefix=p)
-        self._register_live_int_dref("active_index", self._legs_read_active_index, prefix=p)
-        self._register_live_int_dref("entry_count", self._legs_read_entry_count, prefix=p)
-        self._register_live_string_dref("page", self._legs_read_page_indicator, prefix=p)
-        self._register_live_string_dref("sel_count", self._legs_read_selected_over_count, prefix=p)
-        self._register_writable_legs_window_start(prefix=p)
-        for row in range(1, self.LEGS_VISIBLE_ROWS + 1):
-            self._register_live_string_dref(
-                f"row_{row}_index", lambda r=row: self._legs_read_row_index(r), prefix=p)
-            self._register_live_string_dref(
-                f"row_{row}_ident", lambda r=row: self._legs_read_row_ident(r), prefix=p)
-            self._register_live_string_dref(
-                f"row_{row}_alt", lambda r=row: self._legs_read_row_alt(r), prefix=p)
-            self._register_live_int_dref(
-                f"row_{row}_is_active", lambda r=row: self._legs_read_row_is_active(r), prefix=p)
-            self._register_live_int_dref(
-                f"row_{row}_is_selected", lambda r=row: self._legs_read_row_is_selected(r), prefix=p)
-            self._register_live_string_dref(
-                f"row_{row}_status", lambda r=row: self._legs_read_row_status(r), prefix=p)
-
-    def _create_legs_commands(self):
-        p = self.LEGS_CMD_PREFIX
-        self._create_command("scroll_up", "Scroll LEGS selection up", self._cmd_legs_scroll_up, prefix=p)
-        self._create_command("scroll_down", "Scroll LEGS selection down", self._cmd_legs_scroll_down, prefix=p)
-        self._create_command("previous", "Select previous visible LEGS row", self._cmd_legs_previous, prefix=p)
-        self._create_command("next", "Select next visible LEGS row", self._cmd_legs_next, prefix=p)
-        self._create_command("activate", "Activate selected LEGS waypoint", self._cmd_legs_activate, prefix=p)
-        self._create_command("direct_to", "Direct-to selected LEGS waypoint", self._cmd_legs_direct_to, prefix=p)
-        self._create_command("select_row_1", "Select waypoint in row 1", self._cmd_legs_select_row_1, prefix=p)
-        self._create_command("select_row_2", "Select waypoint in row 2", self._cmd_legs_select_row_2, prefix=p)
-        self._create_command("select_row_3", "Select waypoint in row 3", self._cmd_legs_select_row_3, prefix=p)
-        self._create_command("clear_selected", "Clear selected LEGS waypoint", self._cmd_legs_clear_selected, prefix=p)
-        self._create_command("clear_from_here", "Clear from selected waypoint to end", self._cmd_legs_clear_from_here, prefix=p)
-        self._create_command("clear_all", "Clear entire FMS route", self._cmd_legs_clear_all, prefix=p)
-        self._create_command("direct_to_destination", "Direct-to destination (last FMS entry)", self._cmd_legs_direct_to_destination, prefix=p)
 
     # ── State helpers ──
 
@@ -130,7 +53,7 @@ class LegsMixin:
             self.legs_selected = -1
             self.legs_window_start = 0
 
-    # ── Dataref readers ──
+    # ── Dataref readers (used by UI) ──
 
     def _legs_read_selected_index(self) -> int:
         count = self._read_fms_entry_count()
@@ -242,9 +165,7 @@ class LegsMixin:
         if new_start != self.legs_window_start:
             self.legs_window_start = new_start
             self.legs_selected = -1
-            self._log("legs_scroll_up: page", self.legs_window_start // self.LEGS_VISIBLE_ROWS + 1,
-                      "window=", self.legs_window_start, "showing", self.legs_window_start + 1, "-",
-                      min(self.legs_window_start + 3, count))
+            self._log("legs_scroll_up: page", self.legs_window_start // self.LEGS_VISIBLE_ROWS + 1)
         else:
             self._log("legs_scroll_up: already at first page")
 
@@ -259,9 +180,7 @@ class LegsMixin:
         if new_start != self.legs_window_start:
             self.legs_window_start = new_start
             self.legs_selected = -1
-            self._log("legs_scroll_down: page", self.legs_window_start // self.LEGS_VISIBLE_ROWS + 1,
-                      "window=", self.legs_window_start, "showing", self.legs_window_start + 1, "-",
-                      min(self.legs_window_start + 3, count))
+            self._log("legs_scroll_down: page", self.legs_window_start // self.LEGS_VISIBLE_ROWS + 1)
         else:
             self._log("legs_scroll_down: already at last page")
 
@@ -320,7 +239,7 @@ class LegsMixin:
             if hasattr(xp, "setDirectToFMSFlightPlanEntry"):
                 xp.setDirectToFMSFlightPlanEntry(fp, target)
             else:
-                self._log("legs_direct_to: API xp.setDirectToFMSFlightPlanEntry not available (XP12 feature)")
+                self._log("legs_direct_to: setDirectToFMSFlightPlanEntry not available (XP12 only)")
                 return
             info = self._safe_fms_entry_info(target)
             ident = info.navAidID if info else "?"

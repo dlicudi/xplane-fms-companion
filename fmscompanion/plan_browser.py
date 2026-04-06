@@ -4,8 +4,6 @@ import os
 import time
 from typing import Dict, Optional
 
-from XPPython3 import xp
-
 
 class PlanBrowserMixin:
     """Mixin providing the scrollable plan list browser (display, sort, row selection)."""
@@ -125,7 +123,6 @@ class PlanBrowserMixin:
         return str(self._list_rows_cache.get(row, {}).get("dest", ""))
 
     def _plan_list_read_row_route(self, row: int) -> str:
-        """DEP ARR for annunciator second segment (single line)."""
         self._ensure_list_cache()
         return str(self._list_rows_cache.get(row, {}).get("route", ""))
 
@@ -134,7 +131,6 @@ class PlanBrowserMixin:
         return int(self._list_rows_cache.get(row, {}).get("wpt_count", 0))
 
     def _plan_list_read_row_max_alt_ft(self, row: int) -> int:
-        """Max waypoint altitude in the .fms file (ft MSL), 0 if row empty or no points."""
         self._ensure_list_cache()
         return int(self._list_rows_cache.get(row, {}).get("max_alt_ft", 0))
 
@@ -152,9 +148,7 @@ class PlanBrowserMixin:
         if self.index >= 0 and 0 <= self.index < n:
             row_on_page = self.index - w + 1
             if 1 <= row_on_page <= self.PLAN_LIST_VISIBLE_ROWS:
-                res = int(row_on_page)
-                self._log("POLL list_selected_row ->", res)
-                return res
+                return int(row_on_page)
         return 0
 
     def _plan_list_read_page_indicator(self) -> str:
@@ -166,14 +160,13 @@ class PlanBrowserMixin:
         return f"{page}/{total}"
 
     def _plan_list_read_selected_over_count(self) -> str:
-        """SEL on LOAD: which of the 3 visible rows is selected (1–3), not global plan index."""
         nrows = self.PLAN_LIST_VISIBLE_ROWS
         if not self.plans:
             return "0/0"
         if self.index < 0:
             return f"-/{nrows}"
         w = self.browser_list_window_start
-        row = self.index - w + 1  # 1-based row on this page
+        row = self.index - w + 1
         if row < 1 or row > nrows:
             return f"-/{nrows}"
         return f"{row}/{nrows}"
@@ -185,78 +178,12 @@ class PlanBrowserMixin:
         return "DESC" if self.plan_sort_desc else "ASC"
 
     def _plan_list_read_window_page(self) -> int:
-        """1-based plan-list page (rows 1–3 = page 1, etc.)."""
         n = len(self.plans)
         if n <= 0:
             return 1
         w = self.browser_list_window_start
         page = w // self.PLAN_LIST_VISIBLE_ROWS + 1
         return max(1, int(page))
-
-    # ── Dataref and command registration ──
-
-    def _register_plan_list_window_drefs(self):
-        p = self.DREF_PREFIX
-        self._register_live_string_dref("list_page", self._plan_list_read_page_indicator, prefix=p)
-        self._register_live_string_dref("list_sel_count", self._plan_list_read_selected_over_count, prefix=p)
-        self._register_live_string_dref("list_sort_key", self._plan_list_read_sort_key_label, prefix=p)
-        self._register_live_string_dref("list_sort_direction", self._plan_list_read_sort_dir_label, prefix=p)
-        self._register_live_int_dref("list_window_page", self._plan_list_read_window_page, prefix=p)
-        for row in range(1, self.PLAN_LIST_VISIBLE_ROWS + 1):
-            self._register_live_string_dref(
-                f"list_row_{row}_index", lambda r=row: self._plan_list_read_row_plan_index(r), prefix=p)
-            self._register_live_string_dref(
-                f"list_row_{row}_filename", lambda r=row: self._plan_list_read_row_filename(r), prefix=p)
-            self._register_live_string_dref(
-                f"list_row_{row}_timestamp", lambda r=row: self._plan_list_read_row_timestamp(r), prefix=p)
-            self._register_live_string_dref(
-                f"list_row_{row}_dep", lambda r=row: self._plan_list_read_row_dep(r), prefix=p)
-            self._register_live_string_dref(
-                f"list_row_{row}_dest", lambda r=row: self._plan_list_read_row_dest(r), prefix=p)
-            self._register_live_string_dref(
-                f"list_row_{row}_route", lambda r=row: self._plan_list_read_row_route(r), prefix=p)
-            self._register_live_int_dref(
-                f"list_row_{row}_wpt_count", lambda r=row: self._plan_list_read_row_wpt_count(r), prefix=p)
-            self._register_live_int_dref(
-                f"list_row_{row}_max_alt_ft", lambda r=row: self._plan_list_read_row_max_alt_ft(r), prefix=p)
-            self._register_live_int_dref(
-                f"list_row_{row}_distance_nm", lambda r=row: self._plan_list_read_row_distance_nm(r), prefix=p)
-            self._register_live_string_dref(
-                f"list_row_{row}_status", lambda r=row: self._plan_list_read_row_status(r), prefix=p)
-
-        self._register_live_int_dref(
-            "list_selected_row", lambda: self._plan_list_read_selected_row(), prefix=p)
-        for row in range(1, self.PLAN_LIST_VISIBLE_ROWS + 1):
-            self._register_live_int_dref(
-                f"list_row_{row}_is_selected",
-                lambda r=row: 1 if self._plan_list_read_selected_row() == r else 0,
-                prefix=p)
-
-    def _create_plan_list_window_commands(self):
-        p = self.CMD_PREFIX
-        self._create_command(
-            "list_scroll_up", "Scroll plan list up (previous page of 3)", self._cmd_list_scroll_up, prefix=p)
-        self._create_command(
-            "list_scroll_down", "Scroll plan list down (next page of 3)", self._cmd_list_scroll_down, prefix=p)
-        self._create_command(
-            "list_select_row_1", "Select plan in list row 1", self._cmd_list_select_row_1, prefix=p)
-        self._create_command(
-            "list_select_row_2", "Select plan in list row 2", self._cmd_list_select_row_2, prefix=p)
-        self._create_command(
-            "list_select_row_3", "Select plan in list row 3", self._cmd_list_select_row_3, prefix=p)
-        self._create_command(
-            "list_sort_filename", "Sort plan list by filename", self._cmd_list_sort_filename, prefix=p)
-        self._create_command(
-            "list_sort_timestamp", "Sort plan list by file timestamp", self._cmd_list_sort_timestamp, prefix=p)
-        self._create_command(
-            "list_sort_toggle_key", "Toggle plan list sort key", self._cmd_list_toggle_sort_key, prefix=p)
-        self._create_command(
-            "list_sort_asc", "Sort plan list ascending", self._cmd_list_sort_asc, prefix=p)
-        self._create_command(
-            "list_sort_desc", "Sort plan list descending", self._cmd_list_sort_desc, prefix=p)
-        self._create_command(
-            "list_sort_toggle_direction", "Toggle plan list sort direction",
-            self._cmd_list_toggle_sort_direction, prefix=p)
 
     # ── Sort ──
 
@@ -340,13 +267,10 @@ class PlanBrowserMixin:
         new_start = max(0, self.browser_list_window_start - self.PLAN_LIST_VISIBLE_ROWS)
         if new_start != self.browser_list_window_start:
             self.browser_list_window_start = new_start
-            self.index = -1  # clear selection when paging
+            self.index = -1
             self._invalidate_list_cache()
-            self._log(
-                "list_scroll_up: page",
-                self.browser_list_window_start // self.PLAN_LIST_VISIBLE_ROWS + 1,
-                "window_start=", self.browser_list_window_start,
-            )
+            self._log("list_scroll_up: page",
+                      self.browser_list_window_start // self.PLAN_LIST_VISIBLE_ROWS + 1)
             self._set_status("READY")
             self._publish_state()
 
@@ -360,13 +284,10 @@ class PlanBrowserMixin:
         new_start = min(next_start, max_w)
         if new_start != self.browser_list_window_start:
             self.browser_list_window_start = new_start
-            self.index = -1  # clear selection when paging
+            self.index = -1
             self._invalidate_list_cache()
-            self._log(
-                "list_scroll_down: page",
-                self.browser_list_window_start // self.PLAN_LIST_VISIBLE_ROWS + 1,
-                "window_start=", self.browser_list_window_start,
-            )
+            self._log("list_scroll_down: page",
+                      self.browser_list_window_start // self.PLAN_LIST_VISIBLE_ROWS + 1)
             self._set_status("READY")
             self._publish_state()
 

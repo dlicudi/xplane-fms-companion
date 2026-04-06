@@ -1,3 +1,5 @@
 {
-  "typeCheckingMode": "off"
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "reportArgumentType": "none"
 }

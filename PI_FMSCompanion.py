@@ -37,7 +37,7 @@ from XPPython3 import xp
 from fmscompanion.fms_io import FmsIOMixin
 from fmscompanion.fms_state import FmsStateMixin
 from fmscompanion.legs import LegsMixin
-from fmscompanion.models import FlightPlanInfo, ValidationIssue
+from fmscompanion.models import FlightPlanInfo, ValidationIssue, SEVERITY_INFO, SEVERITY_WARN
 from fmscompanion.metar import fetch_metar, parse_wind, rank_runways
 from fmscompanion.nav_monitor import NavMonitorMixin
 from fmscompanion.plan_browser import PlanBrowserMixin
@@ -216,11 +216,47 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
             return
         try:
             entries = self._get_cached_entries(plan)
-            self.validation_issues = validate(entries, plan)
+            issues = validate(entries, plan)
+
+            # ── Live-state checks (need FMS/mixin access, can't live in validator.py) ──
+
+            # No approach selected via APP tab
+            if not self._proc_loaded.get("app", ""):
+                dest = (plan.dest or "").strip()
+                issues.append(ValidationIssue(
+                    severity=SEVERITY_WARN,
+                    code="NO_APP",
+                    message=f"No approach selected for {dest or 'destination'}.",
+                    suggestion="Browse approach procedures on the APP tab.",
+                ))
+
+            # Active waypoint check
+            try:
+                count = xp.countFMSEntries()
+                if count > 1:
+                    active = xp.getDestinationFMSEntry()
+                    if active == 0:
+                        issues.append(ValidationIssue(
+                            severity=SEVERITY_INFO,
+                            code="ACTIVE_AT_DEP",
+                            message="Active waypoint is still the departure airport.",
+                            suggestion="Advance to the first en-route or SID fix.",
+                        ))
+                    elif active >= count - 1:
+                        issues.append(ValidationIssue(
+                            severity=SEVERITY_INFO,
+                            code="ACTIVE_AT_DEST",
+                            message="Active waypoint is the destination airport.",
+                            suggestion="Check whether the correct leg is active.",
+                        ))
+            except Exception:
+                pass
+
+            self.validation_issues = issues
             self._log(
                 "Validation:",
-                len(self.validation_issues), "issues",
-                {s: sum(1 for v in self.validation_issues if v.severity == s)
+                len(issues), "issues",
+                {s: sum(1 for v in issues if v.severity == s)
                  for s in ("ERROR", "WARN", "INFO")},
             )
         except Exception as exc:

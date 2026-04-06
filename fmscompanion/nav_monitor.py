@@ -21,13 +21,15 @@ _XTK_WARN_DOTS = 1.5
 # Suppresses advisory chatter while taxiing or sitting on the ramp.
 _GS_AIRBORNE_KT = 40.0
 
-# Dataref paths read by the flight loop (all floats)
+# Scalar dataref paths
 _NM_DREF_PATHS = {
-    "xtk":      "sim/cockpit/radios/gps_course_deviation",    # CDI dots (signed, +R/-L)
-    "gs":       "sim/cockpit2/gauges/indicators/ground_speed_kt",
-    "fuel_kg":  "sim/flightmodel/weight/m_fuel_total",         # total fuel remaining, kg
-    "flow_kgs": "sim/cockpit2/engine/indicators/fuel_flow_kg_sec_sum",  # total flow, kg/s
+    "xtk":     "sim/cockpit/radios/gps_course_deviation",  # CDI dots (signed, +R/-L)
+    "gs":      "sim/cockpit2/gauges/indicators/ground_speed_kt",
+    "fuel_kg": "sim/flightmodel/weight/m_fuel_total",       # total fuel remaining, kg
 }
+
+# Per-engine array dref — must be read with getDatavf and summed
+_FLOW_DREF_PATH = "sim/cockpit2/engine/indicators/fuel_flow_kg_sec"  # [8], kg/s per engine
 
 
 class NavMonitorMixin:
@@ -36,6 +38,7 @@ class NavMonitorMixin:
     def _nav_monitor_init(self):
         """Call from __init__ before any XP APIs are available."""
         self._nm_drefs: dict = {}
+        self._nm_flow_ref = None          # array dref, handled separately
         self._nm_loop_ref = None
         self.nav_advisories: list = []   # list of str, read by UIMixin
         self.fuel_on_board_kg: float = 0.0
@@ -70,7 +73,23 @@ class NavMonitorMixin:
                 self._nm_drefs[key] = ref if ref else None
             except Exception:
                 self._nm_drefs[key] = None
-        self._log("NavMonitor drefs resolved:", {k: bool(v) for k, v in self._nm_drefs.items()})
+        try:
+            ref = xp.findDataRef(_FLOW_DREF_PATH)
+            self._nm_flow_ref = ref if ref else None
+        except Exception:
+            self._nm_flow_ref = None
+        self._log("NavMonitor drefs resolved:", {k: bool(v) for k, v in self._nm_drefs.items()},
+                  "flow:", bool(self._nm_flow_ref))
+
+    def _nm_read_fuel_flow(self) -> float:
+        """Sum per-engine fuel flow array (kg/s total across all engines)."""
+        if not self._nm_flow_ref:
+            return 0.0
+        try:
+            vals = xp.getDatavf(self._nm_flow_ref, [], 0, 8)
+            return sum(v for v in vals if v > 0)
+        except Exception:
+            return 0.0
 
     def _nm_getf(self, key: str, default: float = 0.0) -> float:
         ref = self._nm_drefs.get(key)
@@ -100,5 +119,5 @@ class NavMonitorMixin:
                 advisories.append(f"OFF COURSE  {abs(xtk):.1f} dot {side}")
 
         self.fuel_on_board_kg = self._nm_getf("fuel_kg")
-        self.fuel_flow_kg_s   = self._nm_getf("flow_kgs")
+        self.fuel_flow_kg_s   = self._nm_read_fuel_flow()
         self.nav_advisories   = advisories

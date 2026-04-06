@@ -895,7 +895,7 @@ class UIMixin:
 
         imgui.separator()
         imgui.text_colored(
-            "Advisory only — based on plan total distance and current GS/burn rate.",
+            "Advisory only - based on plan total distance and current GS/burn rate.",
             *_COL_DIM,
         )
 

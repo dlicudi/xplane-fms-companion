@@ -104,9 +104,9 @@ def _check_missing_sid(plan: FlightPlanInfo, issues: List[ValidationIssue]) -> N
     dep = (plan.dep or "").strip()
     if dep and dep != "----" and not (plan.sid or "").strip():
         issues.append(ValidationIssue(
-            severity=SEVERITY_INFO,
+            severity=SEVERITY_WARN,
             code="NO_SID",
-            message=f"No SID set for departure {dep}.",
+            message=f"No SID selected for departure {dep}.",
             suggestion="Browse departure procedures on the DEP tab.",
         ))
 
@@ -115,9 +115,9 @@ def _check_missing_star(plan: FlightPlanInfo, issues: List[ValidationIssue]) -> 
     dest = (plan.dest or "").strip()
     if dest and dest != "----" and not (plan.star or "").strip():
         issues.append(ValidationIssue(
-            severity=SEVERITY_INFO,
+            severity=SEVERITY_WARN,
             code="NO_STAR",
-            message=f"No STAR set for arrival {dest}.",
+            message=f"No STAR selected for arrival {dest}.",
             suggestion="Browse arrival procedures on the ARR tab.",
         ))
 

@@ -86,8 +86,9 @@ class NavMonitorMixin:
         if not self._nm_flow_ref:
             return 0.0
         try:
-            vals = xp.getDatavf(self._nm_flow_ref, [], 0, 8)
-            return sum(v for v in vals if v > 0)
+            out = []
+            xp.getDatavf(self._nm_flow_ref, out, 0, 8)
+            return sum(v for v in out if v > 0)
         except Exception:
             return 0.0
 

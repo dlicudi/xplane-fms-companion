@@ -176,6 +176,11 @@ def _check_duplicate_fixes(
         seen_at[ident] = i
 
 
+def _has_valid_coords(entry: FlightPlanEntry) -> bool:
+    """Return False if the entry has unresolved zero coords (not a deliberate lat/lon fix)."""
+    return entry.entry_type == _TYPE_LATLON or not (entry.lat == 0.0 and entry.lon == 0.0)
+
+
 def _check_route_jumps(
     entries: List[FlightPlanEntry],
     issues: List[ValidationIssue],
@@ -183,27 +188,35 @@ def _check_route_jumps(
     if len(entries) < 2:
         return
 
-    distances = [
-        _haversine_nm(entries[i - 1].lat, entries[i - 1].lon,
-                      entries[i].lat,     entries[i].lon)
+    # Skip legs where either endpoint has unresolved (0, 0) coords — those are
+    # already flagged by _check_invalid_coords and would produce phantom 2000+ nm
+    # distances that corrupt the median and generate misleading ROUTE_JUMP warnings.
+    # Track (from_idx, to_idx, distance) so we can report correct entry numbers.
+    valid_legs = [
+        (i - 1, i, _haversine_nm(entries[i - 1].lat, entries[i - 1].lon,
+                                  entries[i].lat,     entries[i].lon))
         for i in range(1, len(entries))
+        if _has_valid_coords(entries[i - 1]) and _has_valid_coords(entries[i])
     ]
 
-    median = _median(distances)
+    if not valid_legs:
+        return
+
+    distances = [d for _, _, d in valid_legs]
+    median    = _median(distances)
     threshold = max(_JUMP_MULTIPLIER * median, _JUMP_MIN_NM)
 
-    for i, dist in enumerate(distances):
+    for from_idx, to_idx, dist in valid_legs:
         if dist > threshold:
-            from_ident = entries[i].ident
-            to_ident   = entries[i + 1].ident
             issues.append(ValidationIssue(
                 severity=SEVERITY_WARN,
                 code="ROUTE_JUMP",
                 message=(
-                    f"Large leg #{i + 1}→#{i + 2} ({from_ident} → {to_ident}): "
+                    f"Large leg #{from_idx + 1}→#{to_idx + 1} "
+                    f"({entries[from_idx].ident} → {entries[to_idx].ident}): "
                     f"{dist:.0f} nm (median {median:.0f} nm)."
                 ),
-                affected_index=i + 1,
+                affected_index=to_idx,
                 suggestion="Check for a missing waypoint or an out-of-sequence fix.",
             ))
 

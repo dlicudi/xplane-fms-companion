@@ -38,8 +38,9 @@ _TAB_APP     = 7
 _TAB_APP_TR  = 8
 _TAB_CHECK   = 9
 _TAB_FUEL    = 10
+_TAB_WIND    = 11
 
-_TAB_LABELS = ["LOAD", "NAV", "ROUTE", "DEP", "DEP TR", "ARR", "ARR TR", "APP", "APP TR", "CHECK", "FUEL"]
+_TAB_LABELS = ["LOAD", "NAV", "ROUTE", "DEP", "DEP TR", "ARR", "ARR TR", "APP", "APP TR", "CHECK", "FUEL", "WIND"]
 
 _PROC_KIND_FOR_TAB  = {_TAB_DEP: "dep", _TAB_ARR: "arr", _TAB_APP: "app"}
 _TRANS_KIND_FOR_TAB = {_TAB_DEP_TR: "dep", _TAB_ARR_TR: "arr", _TAB_APP_TR: "app"}
@@ -211,10 +212,25 @@ class UIMixin:
             self._ui_draw_check()
         elif self._ui_tab == _TAB_FUEL:
             self._ui_draw_fuel()
+        elif self._ui_tab == _TAB_WIND:
+            self._ui_draw_wind()
         elif self._ui_tab in _PROC_KIND_FOR_TAB:
             self._ui_draw_proc_names(_PROC_KIND_FOR_TAB[self._ui_tab])
         elif self._ui_tab in _TRANS_KIND_FOR_TAB:
             self._ui_draw_proc_trans(_TRANS_KIND_FOR_TAB[self._ui_tab])
+
+    # ── Dynamic row count ─────────────────────────────────────────────────────
+
+    def _ui_visible_rows(self, reserved_px: int = 200, minimum: int = 3) -> int:
+        """Return how many list rows fit in the remaining content region height."""
+        try:
+            _, avail_h = imgui.get_content_region_avail()
+            line_h = imgui.get_text_line_height_with_spacing()
+            if line_h > 0:
+                return max(minimum, int((avail_h - reserved_px) / line_h))
+        except Exception:
+            pass
+        return minimum
 
     # ── NAV tab ───────────────────────────────────────────────────────────────
 
@@ -325,6 +341,7 @@ class UIMixin:
     # ── LOAD tab ───────────────────────────────────────────────────────────────
 
     def _ui_draw_load(self):
+        self.PLAN_LIST_VISIBLE_ROWS = self._ui_visible_rows(reserved_px=230)
         sv = self.string_values
         loaded_fn = sv.get("loaded_filename", "")
 
@@ -430,6 +447,7 @@ class UIMixin:
     # ── ROUTE tab ─────────────────────────────────────────────────────────────
 
     def _ui_draw_route(self):
+        self.LEGS_VISIBLE_ROWS = self._ui_visible_rows(reserved_px=200)
         count = self._read_fms_entry_count()
         if count <= 0:
             imgui.text_colored("FMS route is empty", *_COL_GREY)
@@ -526,6 +544,7 @@ class UIMixin:
     # ── DEP / ARR / APP — procedure name list ─────────────────────────────────
 
     def _ui_draw_proc_names(self, kind: str):
+        self.PROC_VISIBLE_ROWS = self._ui_visible_rows(reserved_px=160)
         label_map = {"dep": "SID", "arr": "STAR", "app": "APP"}
         label    = label_map[kind]
         airport  = self._proc_airport_for(kind)
@@ -597,6 +616,7 @@ class UIMixin:
     # ── DEP TR / ARR TR / APP TR — transition list ────────────────────────────
 
     def _ui_draw_proc_trans(self, kind: str):
+        self.PROC_VISIBLE_ROWS = self._ui_visible_rows(reserved_px=200)
         label_map = {"dep": "SID", "arr": "STAR", "app": "APP"}
         label     = label_map[kind]
         sel_name  = self._proc_selected_proc_name(kind)
@@ -858,3 +878,97 @@ class UIMixin:
             "Advisory only — based on plan total distance and current GS/burn rate.",
             *_COL_DIM,
         )
+
+    # ── WIND tab ──────────────────────────────────────────────────────────────
+
+    def _ui_draw_wind(self):
+        dest_icao   = getattr(self, "proc_dest_icao", "") or ""
+        metar_str   = getattr(self, "wind_metar",    "")
+        wind_dir    = getattr(self, "wind_dir",       None)   # float or None (VRB)
+        wind_spd    = getattr(self, "wind_spd",       None)   # float or None
+        ranking     = getattr(self, "wind_runway_ranking", [])
+
+        # Header
+        imgui.text_colored("DEST", *_COL_YELLOW)
+        imgui.same_line()
+        imgui.text_colored(f"  {dest_icao or '----'}", *(_COL_CYAN if dest_icao else _COL_GREY))
+        imgui.same_line()
+        if imgui.button("Fetch METAR##wind"):
+            self._cmd_wind_refresh()
+
+        imgui.separator()
+
+        # METAR string
+        if metar_str:
+            imgui.text_colored(metar_str, *_COL_DIM)
+        else:
+            imgui.text_colored(
+                "No METAR — load a plan, then press Fetch METAR." if not dest_icao
+                else f"No METAR available for {dest_icao}.",
+                *_COL_GREY,
+            )
+
+        imgui.separator()
+
+        # Parsed wind summary
+        if wind_spd is not None:
+            if wind_spd == 0.0:
+                imgui.text_colored("CALM", *_COL_GREEN)
+            elif wind_dir is None:
+                imgui.text_colored(f"VRB / {wind_spd:.0f} kt  (variable direction)", *_COL_YELLOW)
+            else:
+                imgui.text_colored(
+                    f"{wind_dir:05.1f}\xb0  /  {wind_spd:.0f} kt",
+                    *_COL_WHITE,
+                )
+        else:
+            if metar_str:
+                imgui.text_colored("Wind not found in METAR", *_COL_GREY)
+            imgui.columns(1)
+            return
+
+        imgui.separator()
+
+        # Runway ranking table
+        if not ranking:
+            if wind_dir is None:
+                imgui.text_colored(
+                    "Cannot rank runways — wind direction is variable.", *_COL_GREY)
+            else:
+                imgui.text_colored(
+                    "No runways found — open APP tab and press Refresh first.", *_COL_GREY)
+            return
+
+        imgui.columns(4, "wind_hdr", border=False)
+        imgui.text_colored("RWY",      *_COL_YELLOW); imgui.next_column()
+        imgui.text_colored("HDG WIND", *_COL_YELLOW); imgui.next_column()
+        imgui.text_colored("X WIND",   *_COL_YELLOW); imgui.next_column()
+        imgui.text_colored("",         *_COL_YELLOW)
+        imgui.columns(1)
+        imgui.separator()
+
+        best_hw = ranking[0][1] if ranking else 0.0
+
+        for rwy, headwind, crosswind in ranking:
+            if headwind == best_hw and headwind > 0:
+                hw_col = _COL_GREEN
+                marker = "\u25b6"   # ▶
+            elif headwind < 0:
+                hw_col = _COL_RED
+                marker = "TW"
+            else:
+                hw_col = _COL_WHITE
+                marker = ""
+
+            imgui.columns(4, f"wind_{rwy}", border=False)
+            imgui.text_colored(rwy,                *_COL_CYAN)
+            imgui.next_column()
+            imgui.text_colored(f"{headwind:+.1f} kt", *hw_col)
+            imgui.next_column()
+            imgui.text_colored(f"{crosswind:.1f} kt",  *_COL_ORANGE)
+            imgui.next_column()
+            imgui.text_colored(marker, *hw_col)
+            imgui.columns(1)
+
+        imgui.separator()
+        imgui.text_colored("Based on reported METAR wind.", *_COL_DIM)

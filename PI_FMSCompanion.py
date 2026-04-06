@@ -24,7 +24,7 @@ Package layout (fmscompanion/):
 import os
 import sys
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 # Make the fmscompanion package importable when deployed as a flat copy alongside
 # the fmscompanion/ package folder in PythonPlugins/.
@@ -38,6 +38,7 @@ from fmscompanion.fms_io import FmsIOMixin
 from fmscompanion.fms_state import FmsStateMixin
 from fmscompanion.legs import LegsMixin
 from fmscompanion.models import FlightPlanInfo, ValidationIssue
+from fmscompanion.metar import fetch_metar, parse_wind, rank_runways
 from fmscompanion.nav_monitor import NavMonitorMixin
 from fmscompanion.plan_browser import PlanBrowserMixin
 from fmscompanion.validator import validate
@@ -113,8 +114,8 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
 
         # ── Plan browser scroll/sort state ──
         self.browser_list_window_start = 0
-        self.plan_sort_key  = 0      # 0 = filename, 1 = timestamp
-        self.plan_sort_desc = False
+        self.plan_sort_key  = 1      # 0 = filename, 1 = timestamp
+        self.plan_sort_desc = True   # most recent first
 
         # ── Registered commands (toggle_window only) ──
         self._cmd_handlers: Dict[str, Dict[str, object]] = {}
@@ -176,6 +177,12 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         # ── Nav monitor ──
         self._nav_monitor_init()
 
+        # ── Wind / METAR ──
+        self.wind_metar: str = ""
+        self.wind_dir:   Optional[float] = None
+        self.wind_spd:   Optional[float] = None
+        self.wind_runway_ranking: list = []
+
         # ── Internal caches ──
         self._perf_enabled     = True
         self._list_rows_cache: Dict[int, Dict[str, object]] = {}
@@ -220,10 +227,43 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
             self._log("Validation error:", exc)
             self.validation_issues = []
 
+    def _cmd_wind_refresh(self):
+        """Fetch METAR for dest airport, parse wind, rank runways from APP procedures."""
+        icao = (self.proc_dest_icao or "").strip().upper()
+        if not icao:
+            self._log("wind_refresh: no dest ICAO")
+            self.wind_metar = ""
+            self.wind_dir   = None
+            self.wind_spd   = None
+            self.wind_runway_ranking = []
+            return
+
+        metar = fetch_metar(icao)
+        self.wind_metar = metar
+        wind_dir, wind_spd = parse_wind(metar)
+        self.wind_dir = wind_dir
+        self.wind_spd = wind_spd
+        self._log(f"wind_refresh: {icao} metar={bool(metar)} dir={wind_dir} spd={wind_spd}")
+
+        # Runway IDs from already-parsed APP procedures
+        seen: set = set()
+        rwy_ids = []
+        for proc in self._proc_procs.get("app", []):
+            rwy = (proc.display_runway or "").strip()
+            if rwy and rwy not in seen:
+                seen.add(rwy)
+                rwy_ids.append(rwy)
+
+        if rwy_ids and wind_dir is not None and wind_spd is not None:
+            self.wind_runway_ranking = rank_runways(rwy_ids, wind_dir, wind_spd)
+        else:
+            self.wind_runway_ranking = []
+
     def _cmd_load(self):
-        """Load selected plan into FMS, then run validation."""
+        """Load selected plan into FMS, run validation, and refresh wind ranking."""
         super()._cmd_load()
         self._run_validation()
+        self._cmd_wind_refresh()
 
     # ── Command registration (used by UIMixin._ui_register_command only) ──
 

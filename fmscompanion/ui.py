@@ -221,13 +221,33 @@ class UIMixin:
 
     # ── Dynamic row count ─────────────────────────────────────────────────────
 
+    # Approximate pixel height of one button row in the default xp_imgui style.
+    _ROW_HEIGHT_PX = 22
+    # Fixed overhead that is always present: title bar + status line + tab bar.
+    _CHROME_PX     = 90
+
     def _ui_visible_rows(self, reserved_px: int = 200, minimum: int = 3) -> int:
-        """Return how many list rows fit in the remaining content region height."""
+        """Return how many list rows fit in the current window height.
+
+        Tries Dear ImGui introspection first; falls back to XP window geometry
+        (reliable since we always have the windowID).
+        """
+        # 1. Dear ImGui content region (works if xp_imgui exposes these)
         try:
             _, avail_h = imgui.get_content_region_avail()
-            line_h = imgui.get_text_line_height_with_spacing()
-            if line_h > 0:
+            line_h     = imgui.get_text_line_height_with_spacing()
+            if line_h > 0 and avail_h > reserved_px:
                 return max(minimum, int((avail_h - reserved_px) / line_h))
+        except Exception:
+            pass
+        # 2. XP window geometry fallback
+        try:
+            wid = self._ui_window.windowID
+            _, top, _, bottom = xp.getWindowGeometry(wid)
+            win_h = top - bottom
+            usable = win_h - self._CHROME_PX - reserved_px
+            if usable > 0:
+                return max(minimum, int(usable / self._ROW_HEIGHT_PX))
         except Exception:
             pass
         return minimum

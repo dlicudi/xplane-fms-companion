@@ -1308,6 +1308,7 @@ class PythonInterface:
         star = ""
         filename = os.path.basename(path)
 
+        stat = None
         try:
             stat = os.stat(path)
             file_mtime = float(stat.st_mtime)
@@ -1341,13 +1342,13 @@ class PythonInterface:
 
         # Use entry cache keyed by (filename, mtime_ns, size) to avoid re-parsing
         # unchanged files on every directory rescan. Reuses the stat() already done above.
-        try:
+        if stat is not None:
             cache_key = (
                 filename,
                 getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1e9)),
                 stat.st_size,
             )
-        except (OSError, NameError):
+        else:
             cache_key = None
 
         if cache_key is not None and cache_key in self._entry_parse_cache:

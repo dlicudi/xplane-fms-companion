@@ -29,24 +29,19 @@ import os
 from XPPython3 import xp
 from fmscompanion.models import SEVERITY_ERROR, SEVERITY_WARN
 
-_TAB_LOAD    = 0
-_TAB_NAV     = 1
-_TAB_ROUTE   = 2
-_TAB_DEP     = 3
-_TAB_DEP_TR  = 4
-_TAB_ARR     = 5
-_TAB_ARR_TR  = 6
-_TAB_APP     = 7
-_TAB_APP_TR  = 8
-_TAB_CHECK   = 9
-_TAB_FUEL    = 10
-_TAB_WIND    = 11
+_TAB_LOAD  = 0
+_TAB_NAV   = 1
+_TAB_ROUTE = 2
+_TAB_DEP   = 3
+_TAB_ARR   = 4
+_TAB_APP   = 5
+_TAB_CHECK = 6
+_TAB_FUEL  = 7
+_TAB_WIND  = 8
 
-_TAB_LABELS = ["LOAD", "NAV", "ROUTE", "DEP", "DEP TR", "ARR", "ARR TR", "APP", "APP TR", "CHECK", "FUEL", "WIND"]
+_TAB_LABELS = ["LOAD", "NAV", "ROUTE", "DEP", "ARR", "APP", "CHECK", "FUEL", "WIND"]
 
-_PROC_KIND_FOR_TAB  = {_TAB_DEP: "dep", _TAB_ARR: "arr", _TAB_APP: "app"}
-_TRANS_KIND_FOR_TAB = {_TAB_DEP_TR: "dep", _TAB_ARR_TR: "arr", _TAB_APP_TR: "app"}
-_TRANS_TAB_FOR_KIND = {"dep": _TAB_DEP_TR, "arr": _TAB_ARR_TR, "app": _TAB_APP_TR}
+_PROC_KIND_FOR_TAB = {_TAB_DEP: "dep", _TAB_ARR: "arr", _TAB_APP: "app"}
 
 _COL_GREEN   = (0.2,  0.9,  0.2,  1.0)
 _COL_YELLOW  = (1.0,  0.8,  0.0,  1.0)
@@ -227,9 +222,11 @@ class UIMixin:
         elif self._ui_tab == _TAB_WIND:
             self._ui_draw_wind()
         elif self._ui_tab in _PROC_KIND_FOR_TAB:
-            self._ui_draw_proc_names(_PROC_KIND_FOR_TAB[self._ui_tab])
-        elif self._ui_tab in _TRANS_KIND_FOR_TAB:
-            self._ui_draw_proc_trans(_TRANS_KIND_FOR_TAB[self._ui_tab])
+            kind = _PROC_KIND_FOR_TAB[self._ui_tab]
+            if self._proc_name_idx.get(kind, -1) >= 0:
+                self._ui_draw_proc_trans(kind)
+            else:
+                self._ui_draw_proc_names(kind)
 
     # ── Dynamic row count ─────────────────────────────────────────────────────
 
@@ -373,7 +370,6 @@ class UIMixin:
     # ── LOAD tab ───────────────────────────────────────────────────────────────
 
     def _ui_draw_load(self):
-        self.PLAN_LIST_VISIBLE_ROWS = self._ui_visible_rows(reserved_px=230)
         sv = self.string_values
         loaded_fn = sv.get("loaded_filename", "")
 
@@ -426,7 +422,7 @@ class UIMixin:
             r = self._list_rows_cache.get(row, {})
             fn = r.get("filename", "")
             if not fn:
-                imgui.text("")
+                imgui.text_colored("-", *_COL_DIM)
                 continue
             is_sel  = r.get("is_selected", 0)
             wpts    = r.get("wpt_count", 0)
@@ -475,11 +471,13 @@ class UIMixin:
                 imgui.separator()
                 if imgui.button("LOAD INTO FMS"):
                     self._cmd_load()
+                imgui.same_line()
+                if imgui.button("+ RECOMMENDED"):
+                    self._cmd_load_recommended()
 
     # ── ROUTE tab ─────────────────────────────────────────────────────────────
 
     def _ui_draw_route(self):
-        self.LEGS_VISIBLE_ROWS = self._ui_visible_rows(reserved_px=200)
         count = self._read_fms_entry_count()
         if count <= 0:
             imgui.text_colored("FMS route is empty", *_COL_GREY)
@@ -511,7 +509,7 @@ class UIMixin:
         for row in range(1, self.LEGS_VISIBLE_ROWS + 1):
             idx = self._legs_fms_index_for_row(row)
             if idx < 0:
-                imgui.text("")
+                imgui.text_colored("-", *_COL_DIM)
                 continue
             ident     = self._legs_read_row_ident(row) or "---"
             alt       = self._legs_read_row_alt(row)
@@ -546,10 +544,10 @@ class UIMixin:
             imgui.columns(1)
 
         imgui.separator()
-        if imgui.button("UP##route"):
+        if imgui.button("< Prev##route"):
             self._cmd_legs_scroll_up()
         imgui.same_line()
-        if imgui.button("DN##route"):
+        if imgui.button("Next >##route"):
             self._cmd_legs_scroll_down()
 
         if self.legs_selected >= 0:
@@ -579,14 +577,26 @@ class UIMixin:
     # ── DEP / ARR / APP — procedure name list ─────────────────────────────────
 
     def _ui_draw_proc_names(self, kind: str):
-        self.PROC_VISIBLE_ROWS = self._ui_visible_rows(reserved_px=160)
         label_map = {"dep": "SID", "arr": "STAR", "app": "APP"}
         label    = label_map[kind]
         airport  = self._proc_airport_for(kind)
         names    = self._proc_names.get(kind, [])
         loaded   = self._proc_loaded.get(kind, "")
         sel_name = self._proc_selected_proc_name(kind)
-        page_str = self._proc_name_list_page_str(kind)
+
+        # Build set of recommended proc names for green highlighting
+        if kind == "dep":
+            rec_display = {dn for dn, _ in getattr(self, "dep_recommended_sids", [])}
+        elif kind == "arr":
+            rec_display = set(getattr(self, "arr_recommended_stars", []))
+        elif kind == "app":
+            rec_display = {dn for dn, _ in getattr(self, "arr_recommended_apps", [])}
+        else:
+            rec_display = set()
+        rec_names = {
+            p.name for p in self._proc_procs.get(kind, [])
+            if p.display_name in rec_display
+        }
 
         imgui.text_colored(label, *_COL_YELLOW)
         imgui.same_line()
@@ -594,6 +604,9 @@ class UIMixin:
         if loaded:
             imgui.same_line()
             imgui.text_colored(f"  \u2713 {loaded}", *_COL_GREEN)
+        if rec_names:
+            imgui.same_line()
+            imgui.text_colored("  * = wind favoured", *_COL_DIM)
         imgui.same_line()
         if imgui.button(f"Refresh##{kind}"):
             self._cmd_proc_refresh(kind)
@@ -605,83 +618,87 @@ class UIMixin:
             imgui.text_colored(f"  DEP: {self.proc_dep_icao or '?'}   DEST: {self.proc_dest_icao or '?'}", *_COL_DIM)
             return
 
-        imgui.columns(4, f"{kind}_hdr", border=False)
+        n = len(names)
+        page_size = self.PROC_VISIBLE_ROWS
+        window_start = self._proc_name_window.get(kind, 0)
+        page = window_start // page_size + 1
+        total_pages = max(1, (n + page_size - 1) // page_size)
+
+        imgui.columns(3, f"{kind}_hdr", border=False)
         imgui.text_colored("#", *_COL_YELLOW)
         imgui.next_column()
         imgui.text_colored(label, *_COL_YELLOW)
         imgui.next_column()
-        imgui.text_colored("", *_COL_YELLOW)
-        imgui.next_column()
-        if page_str:
-            imgui.text_colored(page_str, *_COL_DIM)
+        imgui.text_colored(f"{page}/{total_pages}", *_COL_DIM)
         imgui.columns(1)
         imgui.separator()
 
-        window_start = self._proc_name_window.get(kind, 0)
-        for row in range(1, self.PROC_VISIBLE_ROWS + 1):
-            pi = window_start + row - 1
-            if pi >= len(names):
-                imgui.text("")
+        for row in range(page_size):
+            pi = window_start + row
+            if pi >= n:
+                imgui.text_colored("-", *_COL_DIM)
                 continue
-            name   = names[pi]
+            name = names[pi]
             is_sel = (name == sel_name and sel_name != "")
+            is_rec = name in rec_names
             trans_count = sum(1 for p in self._proc_procs.get(kind, []) if p.name == name)
-            col    = _COL_YELLOW if is_sel else _COL_WHITE
+            col = _COL_YELLOW if is_sel else (_COL_GREEN if is_rec else _COL_WHITE)
+            prefix = "*" if (is_rec and not is_sel) else (">" if is_sel else " ")
 
-            imgui.columns(4, f"{kind}_r{row}", border=False)
+            imgui.columns(3, f"{kind}_r{row}", border=False)
             imgui.text_colored(str(pi + 1), *_COL_DIM)
             imgui.next_column()
             imgui.push_style_color(imgui.COLOR_TEXT, *col)
-            if imgui.button(f"{'>' if is_sel else ' '} {name}##{kind}_{row}"):
-                self._cmd_proc_select_row(kind, row)
-                self._ui_tab = _TRANS_TAB_FOR_KIND[kind]
+            if imgui.button(f"{prefix} {name}##{kind}_{row}"):
+                self._cmd_proc_select_row(kind, pi)
             imgui.pop_style_color()
             imgui.next_column()
-            imgui.text_colored(f"{trans_count} tr" if trans_count > 1 else "", *_COL_DIM)
-            imgui.next_column()
+            imgui.text_colored(f"{trans_count}" if trans_count > 1 else "", *_COL_DIM)
             imgui.columns(1)
 
         imgui.separator()
-        if imgui.button(f"UP##{kind}_np"):
+        if imgui.button(f"< Prev##{kind}_prev"):
             self._cmd_proc_scroll_up(kind)
         imgui.same_line()
-        if imgui.button(f"DN##{kind}_nn"):
+        if imgui.button(f"Next >##{kind}_next"):
             self._cmd_proc_scroll_down(kind)
 
     # ── DEP TR / ARR TR / APP TR — transition list ────────────────────────────
 
     def _ui_draw_proc_trans(self, kind: str):
-        self.PROC_VISIBLE_ROWS = self._ui_visible_rows(reserved_px=200)
         label_map = {"dep": "SID", "arr": "STAR", "app": "APP"}
         label     = label_map[kind]
         sel_name  = self._proc_selected_proc_name(kind)
         loaded    = self._proc_loaded.get(kind, "")
         transitions = self._proc_transitions(kind)
         idx       = self._proc_index.get(kind, -1)
-        page_str  = self._proc_trans_list_page_str(kind)
 
         imgui.text_colored(label, *_COL_YELLOW)
         if sel_name:
             imgui.same_line()
-            imgui.text_colored(f" \u203a {sel_name}", *_COL_YELLOW)
+            imgui.text_colored(f" > {sel_name}", *_COL_YELLOW)
         if loaded:
             imgui.same_line()
             imgui.text_colored(f"  \u2713 {loaded}", *_COL_GREEN)
         imgui.same_line()
         if imgui.button(f"Back##{kind}_back"):
             self._cmd_proc_back(kind)
-            self._ui_tab = _PROC_KIND_FOR_TAB.get(
-                next((t for t, k in _TRANS_KIND_FOR_TAB.items() if k == kind), _TAB_DEP), _TAB_DEP)
 
         imgui.separator()
 
         if not sel_name:
-            imgui.text_colored(f"No {label} selected — go to {label} page first", *_COL_GREY)
+            imgui.text_colored(f"No {label} selected - go to {label} page first", *_COL_GREY)
             return
 
         if not transitions:
             imgui.text_colored(f"No transitions for {sel_name}", *_COL_GREY)
             return
+
+        nt = len(transitions)
+        page_size = self.PROC_VISIBLE_ROWS
+        window_start = self._proc_window.get(kind, 0)
+        page = window_start // page_size + 1
+        total_pages = max(1, (nt + page_size - 1) // page_size)
 
         imgui.columns(4, f"{kind}tr_hdr", border=False)
         imgui.text_colored("#", *_COL_YELLOW)
@@ -690,16 +707,14 @@ class UIMixin:
         imgui.next_column()
         imgui.text_colored("RWY", *_COL_YELLOW)
         imgui.next_column()
-        if page_str:
-            imgui.text_colored(page_str, *_COL_DIM)
+        imgui.text_colored(f"{page}/{total_pages}", *_COL_DIM)
         imgui.columns(1)
         imgui.separator()
 
-        window_start = self._proc_window.get(kind, 0)
-        for row in range(1, self.PROC_VISIBLE_ROWS + 1):
-            pi = window_start + row - 1
-            if pi >= len(transitions):
-                imgui.text("")
+        for row in range(page_size):
+            pi = window_start + row
+            if pi >= nt:
+                imgui.text_colored("-", *_COL_DIM)
                 continue
             proc   = transitions[pi]
             is_sel = pi == idx
@@ -710,7 +725,7 @@ class UIMixin:
             imgui.next_column()
             imgui.push_style_color(imgui.COLOR_TEXT, *col)
             if imgui.button(f"{'>' if is_sel else ' '} {proc.display_name}##{kind}tr_{row}"):
-                self._cmd_proc_select_trans_row(kind, row)
+                self._cmd_proc_select_trans_row(kind, pi)
             imgui.pop_style_color()
             imgui.next_column()
             imgui.text_colored(proc.display_runway or "", *_COL_ORANGE)
@@ -718,10 +733,10 @@ class UIMixin:
             imgui.columns(1)
 
         imgui.separator()
-        if imgui.button(f"UP##{kind}tr_up"):
+        if imgui.button(f"< Prev##{kind}tr_prev"):
             self._cmd_proc_trans_scroll_up(kind)
         imgui.same_line()
-        if imgui.button(f"DN##{kind}tr_dn"):
+        if imgui.button(f"Next >##{kind}tr_next"):
             self._cmd_proc_trans_scroll_down(kind)
 
         if idx >= 0:
@@ -931,9 +946,6 @@ class UIMixin:
             wind_dir=getattr(self, "dep_wind_dir",  None),
             wind_spd=getattr(self, "dep_wind_spd",  None),
             ranking=getattr(self, "dep_runway_ranking", []),
-            proc_label="Recommended SIDs",
-            procs=getattr(self, "dep_recommended_sids", []),
-            stars=None,
             fetch_cmd=self._wind_refresh_dep,
             id_prefix="dep",
         )
@@ -946,15 +958,12 @@ class UIMixin:
             wind_dir=getattr(self, "wind_dir",  None),
             wind_spd=getattr(self, "wind_spd",  None),
             ranking=getattr(self, "wind_runway_ranking", []),
-            proc_label="Recommended approaches",
-            procs=getattr(self, "arr_recommended_apps", []),
-            stars=getattr(self, "arr_recommended_stars", []),
             fetch_cmd=self._wind_refresh_arr,
             id_prefix="arr",
         )
 
     def _ui_wind_section(self, label, icao, metar, wind_dir, wind_spd,
-                         ranking, proc_label, procs, stars, fetch_cmd, id_prefix):
+                         ranking, fetch_cmd, id_prefix):
         # Section header
         imgui.text_colored(label, *_COL_YELLOW)
         imgui.same_line()
@@ -1015,17 +1024,4 @@ class UIMixin:
                 imgui.text_colored(marker,                *hw_col)
                 imgui.columns(1)
 
-        # Procedure recommendations
-        if procs:
-            imgui.text_colored(proc_label + ":", *_COL_YELLOW)
-            for name, rwy in procs:
-                imgui.text_colored(f"  {name}", *_COL_GREEN)
-
-        # STARs (arrival only — not runway-specific in CIFP)
-        if stars is not None:
-            imgui.text_colored("Available STARs:", *_COL_YELLOW)
-            if stars:
-                for name in stars:
-                    imgui.text_colored(f"  {name}", *_COL_WHITE)
-            else:
-                imgui.text_colored("  None - open ARR tab and Refresh first.", *_COL_GREY)
+        # Recommendations are shown in the DEP / ARR / APP tabs with Apply buttons.

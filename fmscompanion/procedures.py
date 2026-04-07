@@ -157,6 +157,43 @@ class ProceduresMixin:
 
     # ── Procedure state helpers ──
 
+    def _cmd_apply_recommended(self, kind: str, display_name: str) -> bool:
+        """Select and immediately activate a procedure by its display_name.
+
+        Handles the three-level selection (name → transition → activate) in one
+        call so the UI can wire a single button per recommendation.
+        Returns True if the procedure was found and activated.
+        """
+        # Find the target ProcedureInfo
+        target = next(
+            (p for p in self._proc_procs.get(kind, []) if p.display_name == display_name),
+            None,
+        )
+        if target is None:
+            self._log(f"apply_recommended({kind}): '{display_name}' not found")
+            return False
+
+        # Select the procedure name (opens the transitions view for that name)
+        names = self._proc_names.get(kind, [])
+        if target.name not in names:
+            self._log(f"apply_recommended({kind}): name '{target.name}' not in names list")
+            return False
+        self._proc_name_idx[kind] = names.index(target.name)
+        self._proc_invalidate_both(kind)
+
+        # Select the transition within that name
+        transitions = self._proc_transitions(kind)
+        for i, proc in enumerate(transitions):
+            if proc.display_name == display_name:
+                self._proc_index[kind] = i
+                break
+        else:
+            self._log(f"apply_recommended({kind}): transition '{display_name}' not found")
+            return False
+
+        self._cmd_proc_activate(kind)
+        return True
+
     def _proc_airport_for(self, kind: str) -> str:
         return self.proc_dep_icao if kind == "dep" else self.proc_dest_icao
 
@@ -431,18 +468,16 @@ class ProceduresMixin:
             self._proc_name_window[kind] = new_start
             self._proc_invalidate_cache(kind)
 
-    def _cmd_proc_select_row(self, kind: str, row: int) -> None:
-        """Select (highlight) a procedure name. Does not drill in — stays on name list."""
+    def _cmd_proc_select_row(self, kind: str, pi: int) -> None:
+        """Select (highlight) a procedure name by absolute index. Does not drill in."""
         names = self._proc_names.get(kind, [])
-        w = self._proc_name_window.get(kind, 0)
-        pi = w + (row - 1)
         if not names or pi < 0 or pi >= len(names):
             return
         self._proc_name_idx[kind] = pi
         self._proc_index[kind] = -1
         self._proc_window[kind] = 0
         self._proc_invalidate_both(kind)
-        self._log(f"proc_select_row({kind}, {row}) -> selected name '{names[pi]}'")
+        self._log(f"proc_select_row({kind}, {pi}) -> selected name '{names[pi]}'")
         # Auto-select if there is exactly one transition
         transitions = self._proc_transitions(kind)
         if len(transitions) == 1:
@@ -492,15 +527,13 @@ class ProceduresMixin:
             self._proc_index[kind] = -1
             self._proc_invalidate_trans_cache(kind)
 
-    def _cmd_proc_select_trans_row(self, kind: str, row: int) -> None:
+    def _cmd_proc_select_trans_row(self, kind: str, pi: int) -> None:
         transitions = self._proc_transitions(kind)
-        w = self._proc_window.get(kind, 0)
-        pi = w + (row - 1)
         if not transitions or pi < 0 or pi >= len(transitions):
             return
         self._proc_index[kind] = pi
         self._proc_invalidate_trans_cache(kind)
-        self._log(f"proc_select_trans_row({kind}, {row}) -> index={pi}")
+        self._log(f"proc_select_trans_row({kind}) -> index={pi}")
 
     def _cmd_proc_trans_previous(self, kind: str) -> None:
         transitions = self._proc_transitions(kind)
@@ -608,28 +641,19 @@ class ProceduresMixin:
         write_idx = 0
         try:
             if proc.proc_type == "SID":
-                count = xp.countFMSEntries()
-                existing = [xp.getFMSEntryInfo(i) for i in range(count)]
+                # Re-insert original plan entries (from .fms file) rather than
+                # the current FMS state, which may carry over bad navaid lookups
+                # from previous procedure activations.
+                plan = self._selected_plan()
+                original = self._get_cached_entries(plan) if plan else []
                 self._clear_fms()
                 for ref, ident in proc_nav:
                     if ref != xp.NAV_NOT_FOUND:
                         xp.setFMSEntryInfo(write_idx, ref, 0)
                         write_idx += 1
-                for info in existing:
+                for entry in original:
                     try:
-                        lat = getattr(info, "lat", getattr(info, "latitude", 0.0))
-                        lon = getattr(info, "lon", getattr(info, "longitude", 0.0))
-                        nav_id = getattr(info, "navAidID", "").strip()
-                        if getattr(info, "type", None) == xp.Nav_LatLon or not nav_id:
-                            xp.setFMSEntryLatLon(write_idx, lat, lon, info.altitude)
-                        else:
-                            ref = xp.findNavAid(None, nav_id, lat, lon, None, xp.Nav_Fix)
-                            if ref == xp.NAV_NOT_FOUND:
-                                ref = xp.findNavAid(None, nav_id, lat, lon, None, xp.Nav_VOR)
-                            if ref != xp.NAV_NOT_FOUND:
-                                xp.setFMSEntryInfo(write_idx, ref, info.altitude)
-                            else:
-                                xp.setFMSEntryLatLon(write_idx, lat, lon, info.altitude)
+                        self._load_entry_into_fms(write_idx, entry)
                         write_idx += 1
                     except Exception:
                         pass

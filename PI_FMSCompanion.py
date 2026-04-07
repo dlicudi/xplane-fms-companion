@@ -63,10 +63,10 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
     CMD_PREFIX = "fmscompanion"
 
     # ── Layout constants ──
-    PLAN_LIST_VISIBLE_ROWS = 3
-    PLAN_LIST_MAX_PLANS    = 9
-    LEGS_VISIBLE_ROWS      = 3
-    PROC_VISIBLE_ROWS      = 3
+    PLAN_LIST_VISIBLE_ROWS = 10
+    PLAN_LIST_MAX_PLANS    = 10
+    LEGS_VISIBLE_ROWS      = 10
+    PROC_VISIBLE_ROWS      = 10
 
     # ── Procedure kinds ──
     KINDS           = ("dep", "arr", "app")
@@ -282,6 +282,14 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
 
     # ── Wind helpers ──────────────────────────────────────────────────────────
 
+    def _route_idents(self) -> set:
+        """Return the set of waypoint idents currently in the FMS plan."""
+        try:
+            count = xp.countFMSEntries()
+            return {xp.getFMSEntryInfo(i).ident for i in range(count)}
+        except Exception:
+            return set()
+
     @staticmethod
     def _rwy_num(rwy_id: str) -> str:
         """Strip all trailing letters from a runway id, returning just the digits.
@@ -294,6 +302,7 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         """Fetch METAR for both DEP and DEST, rank runways, recommend procedures."""
         self._wind_refresh_dep()
         self._wind_refresh_arr()
+        self._save_state()
 
     def _wind_refresh_dep(self):
         icao = (self.proc_dep_icao or "").strip().upper()
@@ -319,13 +328,22 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         else:
             self.dep_runway_ranking = []
 
-        # SIDs for the best departure runway
+        # SIDs for the best departure runway, filtered by route connectivity.
+        # A SID is a good connector if its last waypoint appears in the FMS route.
         if self.dep_runway_ranking:
             best_num = self._rwy_num(self.dep_runway_ranking[0][0])
-            self.dep_recommended_sids = [
-                (proc.display_name, proc.display_runway)
-                for proc in self._proc_procs.get("dep", [])
+            route = self._route_idents()
+            runway_sids = [
+                proc for proc in self._proc_procs.get("dep", [])
                 if self._rwy_num(proc.display_runway or "") == best_num
+            ]
+            connected = [
+                (p.display_name, p.display_runway) for p in runway_sids
+                if p.waypoints and p.waypoints[-1] in route
+            ]
+            # Fall back to all runway-matched SIDs if none connect to the route
+            self.dep_recommended_sids = connected if connected else [
+                (p.display_name, p.display_runway) for p in runway_sids
             ]
         else:
             self.dep_recommended_sids = []
@@ -367,26 +385,160 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         else:
             self.arr_recommended_apps = []
 
-        # STARs — prefer those serving the best arrival runway; fall back to all.
-        # CIFP display_name encodes the served runway as "RW##" e.g. "BOSN1P RW29".
+        # STARs — only recommend those serving the best arrival runway,
+        # further filtered by route connectivity (entry fix must be in FMS route).
+        # If wind is variable/calm (no clear best runway), show no recommendations.
         seen_names: set = set()
-        stars_best: list = []
-        stars_all:  list = []
+        stars_rwy: list = []
         best_rwy_num = self._rwy_num(self.wind_runway_ranking[0][0]) if self.wind_runway_ranking else ""
         for proc in self._proc_procs.get("arr", []):
             if proc.name in seen_names:
                 continue
             seen_names.add(proc.name)
-            stars_all.append(proc.display_name)
             if best_rwy_num and f"RW{best_rwy_num}" in proc.display_name.upper():
-                stars_best.append(proc.display_name)
-        self.arr_recommended_stars = stars_best if stars_best else stars_all
+                stars_rwy.append(proc)
+        route = self._route_idents()
+        # A STAR connects if its transition fix or first waypoint is in the route
+        connected = [
+            p.display_name for p in stars_rwy
+            if (p.transition and p.transition in route)
+            or (p.waypoints and p.waypoints[0] in route)
+        ]
+        self.arr_recommended_stars = connected if connected else [p.display_name for p in stars_rwy]
 
     def _cmd_load(self):
         """Load selected plan into FMS, run validation, and refresh wind ranking."""
         super()._cmd_load()
         self._run_validation()
         self._cmd_wind_refresh()
+        self._save_state()
+
+    def _cmd_proc_activate(self, kind: str) -> None:
+        super()._cmd_proc_activate(kind)
+        self._save_state()
+
+    def _cmd_load_recommended(self):
+        """Load plan then apply the top recommended SID, STAR, and APP in one click."""
+        self._cmd_load()
+        applied = []
+        sid = self.dep_recommended_sids
+        if sid:
+            dn, _ = sid[0]
+            if self._cmd_apply_recommended("dep", dn):
+                applied.append(f"SID:{dn}")
+        star = self.arr_recommended_stars
+        if star:
+            if self._cmd_apply_recommended("arr", star[0]):
+                applied.append(f"STAR:{star[0]}")
+        app = self.arr_recommended_apps
+        if app:
+            dn, _ = app[0]
+            if self._cmd_apply_recommended("app", dn):
+                applied.append(f"APP:{dn}")
+        self._log("load_recommended applied:", ", ".join(applied) if applied else "none")
+
+    # ── State persistence ─────────────────────────────────────────────────────
+
+    def _state_path(self) -> str:
+        return os.path.join(xp.getSystemPath(), "Output", "FMSCompanion", "state.json")
+
+    def _save_state(self):
+        try:
+            path = self._state_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            plan = self._selected_plan()
+            data = {
+                "version": 1,
+                "plan_filename": plan.filename if plan else "",
+                "proc_dep_icao": self.proc_dep_icao,
+                "proc_dest_icao": self.proc_dest_icao,
+                "proc_loaded":   dict(self._proc_loaded),
+                "proc_name_idx": dict(self._proc_name_idx),
+                "proc_index":    dict(self._proc_index),
+                "wind": {
+                    "dep_metar":            self.dep_wind_metar,
+                    "dep_wind_dir":         self.dep_wind_dir,
+                    "dep_wind_spd":         self.dep_wind_spd,
+                    "dep_runway_ranking":   self.dep_runway_ranking,
+                    "dep_recommended_sids": self.dep_recommended_sids,
+                    "arr_metar":            self.wind_metar,
+                    "arr_wind_dir":         self.wind_dir,
+                    "arr_wind_spd":         self.wind_spd,
+                    "arr_runway_ranking":   self.wind_runway_ranking,
+                    "arr_recommended_apps": self.arr_recommended_apps,
+                    "arr_recommended_stars":self.arr_recommended_stars,
+                },
+            }
+            def _safe(obj):
+                if isinstance(obj, float) and (obj != obj or obj in (float('inf'), float('-inf'))):
+                    return None
+                return str(obj)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=_safe)
+        except Exception as exc:
+            self._log("State save error:", exc)
+
+    def _restore_state(self):
+        path = self._state_path()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("version") != 1:
+                return
+
+            # Restore plan selection
+            filename = data.get("plan_filename", "")
+            if filename:
+                for i, plan in enumerate(self.plans):
+                    if plan.filename == filename:
+                        self.index = i
+                        break
+
+            # Restore airports and reload CIFP
+            dep  = data.get("proc_dep_icao",  "")
+            dest = data.get("proc_dest_icao", "")
+            if dep:
+                self.proc_dep_icao = dep
+            if dest:
+                self.proc_dest_icao = dest
+            if dep or dest:
+                self._proc_refresh()
+
+            # Restore procedure selection state
+            for kind in self.KINDS:
+                loaded = data.get("proc_loaded", {}).get(kind, "")
+                name_idx = data.get("proc_name_idx", {}).get(kind, -1)
+                idx = data.get("proc_index", {}).get(kind, -1)
+                if loaded:
+                    self._proc_loaded[kind] = loaded
+                if isinstance(name_idx, int):
+                    names = self._proc_names.get(kind, [])
+                    if 0 <= name_idx < len(names):
+                        self._proc_name_idx[kind] = name_idx
+                if isinstance(idx, int):
+                    self._proc_index[kind] = idx
+
+            # Restore wind data
+            w = data.get("wind", {})
+            self.dep_wind_metar        = w.get("dep_metar", "")
+            self.dep_wind_dir          = w.get("dep_wind_dir")
+            self.dep_wind_spd          = w.get("dep_wind_spd")
+            self.dep_runway_ranking    = w.get("dep_runway_ranking", [])
+            self.dep_recommended_sids  = w.get("dep_recommended_sids", [])
+            self.wind_metar            = w.get("arr_metar", "")
+            self.wind_dir              = w.get("arr_wind_dir")
+            self.wind_spd              = w.get("arr_wind_spd")
+            self.wind_runway_ranking   = w.get("arr_runway_ranking", [])
+            self.arr_recommended_apps  = w.get("arr_recommended_apps", [])
+            self.arr_recommended_stars = w.get("arr_recommended_stars", [])
+
+            # Re-run validation against restored FMS state
+            self._run_validation()
+            self._log("State restored from", path)
+        except Exception as exc:
+            self._log("State restore error:", exc)
 
     # ── State dump ────────────────────────────────────────────────────────────
 
@@ -575,12 +727,14 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         self.enabled = True
         self._log("XPluginEnable")
         self._proc_airports_from_fms()
+        self._restore_state()
         self._nav_monitor_start()
         self._ui_create_window()
         return 1
 
     def XPluginDisable(self):
         self.enabled = False
+        self._save_state()
         self._nav_monitor_stop()
         self._ui_destroy_window()
         self._log("XPluginDisable")

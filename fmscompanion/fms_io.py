@@ -341,7 +341,10 @@ class FmsIOMixin:
     def _cmd_load(self):
         plan = self._selected_plan()
         if plan is None:
-            self.loaded = 0
+            if hasattr(self, "_mark_route_unloaded"):
+                self._mark_route_unloaded()
+            else:
+                self.loaded = 0
             if self.plans:
                 self._set_status("SELECT", "Tap a row or turn E1, then LOAD")
             else:
@@ -352,7 +355,10 @@ class FmsIOMixin:
         try:
             entries = self._get_cached_entries(plan)
             if not entries:
-                self.loaded = 0
+                if hasattr(self, "_mark_route_unloaded"):
+                    self._mark_route_unloaded()
+                else:
+                    self.loaded = 0
                 self._set_status("LOAD FAIL", "No loadable FMS entries found")
                 self._publish_state()
                 return
@@ -362,7 +368,10 @@ class FmsIOMixin:
                 self._load_entry_into_fms(index, entry)
 
             xp.setDisplayedFMSEntry(0)
-            xp.setDestinationFMSEntry(len(entries) - 1)
+            active_idx = 0
+            if len(entries) > 1 and entries[0].entry_type == 1:
+                active_idx = 1
+            xp.setDestinationFMSEntry(min(active_idx, len(entries) - 1))
             self._log("Loaded FMS plan", plan.filename, "entries=", len(entries))
             self.loaded = 1
             self.loaded_filename = os.path.splitext(plan.filename)[0]
@@ -379,7 +388,10 @@ class FmsIOMixin:
                 self.proc_dest_icao = new_dest
                 self._proc_refresh()
         except Exception as exc:
-            self.loaded = 0
+            if hasattr(self, "_mark_route_unloaded"):
+                self._mark_route_unloaded()
+            else:
+                self.loaded = 0
             self._set_status("LOAD ERR", str(exc))
 
         self._publish_state()

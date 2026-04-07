@@ -348,6 +348,10 @@ class LegsMixin:
                 max_start = max(0, new_count - 1)
                 self.legs_window_start = max(0, min(self.legs_window_start, max_start))
             self._log("legs_clear_selected: cleared", target, ident)
+            if hasattr(self, "_sync_route_state"):
+                self._sync_route_state()
+            if hasattr(self, "_save_state"):
+                self._save_state()
         except Exception as exc:
             self._log("legs_clear_selected error:", exc)
 
@@ -369,6 +373,10 @@ class LegsMixin:
                 max_start = max(0, new_count - 1)
                 self.legs_window_start = max(0, min(self.legs_window_start, max_start))
             self._log("legs_clear_from_here: cleared from", target, "count was", count)
+            if hasattr(self, "_sync_route_state"):
+                self._sync_route_state()
+            if hasattr(self, "_save_state"):
+                self._save_state()
         except Exception as exc:
             self._log("legs_clear_from_here error:", exc)
 
@@ -379,6 +387,10 @@ class LegsMixin:
             self.legs_selected = -1
             self.legs_window_start = 0
             self._log("legs_clear_all")
+            if hasattr(self, "_sync_route_state"):
+                self._sync_route_state()
+            if hasattr(self, "_save_state"):
+                self._save_state()
         except Exception as exc:
             self._log("legs_clear_all error:", exc)
 

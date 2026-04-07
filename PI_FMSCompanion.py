@@ -223,13 +223,13 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
     # ── Validation ──
 
     def _run_validation(self):
-        """Run route validation against the currently loaded plan and store results."""
+        """Run route validation against the live FMS route and current selection."""
         plan = self._selected_plan()
         if plan is None or not self.loaded:
             self.validation_issues = []
             return
         try:
-            entries = self._get_cached_entries(plan)
+            entries = self._live_fms_entries()
             issues = validate(entries, plan)
 
             # ── Live-state checks (need FMS/mixin access, can't live in validator.py) ──
@@ -280,13 +280,91 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
             self._log("Validation error:", exc)
             self.validation_issues = []
 
+    def _live_fms_entries(self) -> List["FlightPlanEntry"]:
+        """Return a best-effort FlightPlanEntry snapshot of the current live FMS route."""
+        from fmscompanion.models import FlightPlanEntry
+
+        entries: List[FlightPlanEntry] = []
+        try:
+            count = xp.countFMSEntries()
+        except Exception:
+            return entries
+
+        nav_to_fms_type = {
+            xp.Nav_Airport: 1,
+            xp.Nav_NDB: 2,
+            xp.Nav_VOR: 3,
+            xp.Nav_Fix: 11,
+            xp.Nav_LatLon: 28,
+        }
+
+        for i in range(count):
+            info = self._safe_fms_entry_info(i)
+            if not info:
+                continue
+            lat = getattr(info, "latitude", None)
+            if lat is None:
+                lat = getattr(info, "lat", 0.0)
+            lon = getattr(info, "longitude", None)
+            if lon is None:
+                lon = getattr(info, "lon", 0.0)
+            ident = (getattr(info, "navAidID", "") or "").strip()
+            if not ident and info.type == xp.Nav_LatLon:
+                ident = self._legs_format_ident(info)
+            entries.append(
+                FlightPlanEntry(
+                    entry_type=nav_to_fms_type.get(getattr(info, "type", None), 11),
+                    ident=ident or "----",
+                    altitude=int(getattr(info, "altitude", 0) or 0),
+                    lat=float(lat or 0.0),
+                    lon=float(lon or 0.0),
+                )
+            )
+        return entries
+
+    def _mark_route_unloaded(self):
+        """Reset derived state when there is no longer a loaded route in the FMS."""
+        self.loaded = 0
+        self.loaded_filename = ""
+        self.loaded_index = 0
+        self.loaded_sid = ""
+        self.loaded_star = ""
+        self.loaded_distance_nm = 0.0
+        self.validation_issues = []
+        self.dep_recommended_sids = []
+        self.arr_recommended_apps = []
+        self.arr_recommended_stars = []
+        self.dep_runway_ranking = []
+        self.wind_runway_ranking = []
+        self._proc_loaded = {k: "" for k in self.KINDS}
+        self._proc_splice_point = {k: -1 for k in self.KINDS}
+
+    def _sync_route_state(self):
+        """Refresh loaded state, validation, wind recommendations, and published UI state."""
+        count = self._read_fms_entry_count()
+        if count <= 0:
+            self._mark_route_unloaded()
+            self._set_status("EMPTY")
+        else:
+            self.loaded = 1
+            self._run_validation()
+            self._wind_refresh_dep()
+            self._wind_refresh_arr()
+        self._publish_state()
+
     # ── Wind helpers ──────────────────────────────────────────────────────────
 
     def _route_idents(self) -> set:
         """Return the set of waypoint idents currently in the FMS plan."""
         try:
             count = xp.countFMSEntries()
-            return {xp.getFMSEntryInfo(i).ident for i in range(count)}
+            route = set()
+            for i in range(count):
+                info = self._safe_fms_entry_info(i)
+                ident = (getattr(info, "navAidID", "") or "").strip() if info else ""
+                if ident:
+                    route.add(ident)
+            return route
         except Exception:
             return set()
 
@@ -409,12 +487,12 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
     def _cmd_load(self):
         """Load selected plan into FMS, run validation, and refresh wind ranking."""
         super()._cmd_load()
-        self._run_validation()
-        self._cmd_wind_refresh()
+        self._sync_route_state()
         self._save_state()
 
     def _cmd_proc_activate(self, kind: str) -> None:
         super()._cmd_proc_activate(kind)
+        self._sync_route_state()
         self._save_state()
 
     def _cmd_load_recommended(self):

@@ -249,14 +249,17 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
                 count = xp.countFMSEntries()
                 if count > 1:
                     active = xp.getDestinationFMSEntry()
-                    if active == 0:
+                    active_info = self._safe_fms_entry_info(active)
+                    active_type = active_info.type if active_info else -1
+                    # type 1 = airport; type 512 = fix/navaid; type 2048 = lat/lon
+                    if active_type == xp.Nav_Airport and active == 0:
                         issues.append(ValidationIssue(
                             severity=SEVERITY_INFO,
                             code="ACTIVE_AT_DEP",
                             message="Active waypoint is still the departure airport.",
                             suggestion="Advance to the first en-route or SID fix.",
                         ))
-                    elif active >= count - 1:
+                    elif active_type == xp.Nav_Airport and active >= count - 1:
                         issues.append(ValidationIssue(
                             severity=SEVERITY_INFO,
                             code="ACTIVE_AT_DEST",
@@ -364,14 +367,20 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         else:
             self.arr_recommended_apps = []
 
-        # All available STARs (not runway-specific in CIFP)
+        # STARs — prefer those serving the best arrival runway; fall back to all.
+        # CIFP display_name encodes the served runway as "RW##" e.g. "BOSN1P RW29".
         seen_names: set = set()
-        stars = []
+        stars_best: list = []
+        stars_all:  list = []
+        best_rwy_num = self._rwy_num(self.wind_runway_ranking[0][0]) if self.wind_runway_ranking else ""
         for proc in self._proc_procs.get("arr", []):
-            if proc.name not in seen_names:
-                seen_names.add(proc.name)
-                stars.append(proc.display_name)
-        self.arr_recommended_stars = stars
+            if proc.name in seen_names:
+                continue
+            seen_names.add(proc.name)
+            stars_all.append(proc.display_name)
+            if best_rwy_num and f"RW{best_rwy_num}" in proc.display_name.upper():
+                stars_best.append(proc.display_name)
+        self.arr_recommended_stars = stars_best if stars_best else stars_all
 
     def _cmd_load(self):
         """Load selected plan into FMS, run validation, and refresh wind ranking."""
@@ -428,8 +437,14 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
                 "nav_advisories":    list(self.nav_advisories),
             }
 
+            def _json_safe(obj):
+                """Coerce non-JSON-serialisable values: inf/nan → None."""
+                if isinstance(obj, float) and (obj != obj or obj == float('inf') or obj == float('-inf')):
+                    return None
+                return str(obj)
+
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, default=str)
+                json.dump(data, f, indent=2, default=_json_safe)
 
             self._log("Dump written:", path)
             self.string_values["last_dump"] = os.path.basename(path)

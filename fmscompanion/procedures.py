@@ -5,12 +5,28 @@ Two independent views per kind (dep/arr/app):
   - Trans list (dep/trans_row_N_*) : always shows transitions for the selected name.
 """
 
+import math
 import os
 from typing import Dict, List, Optional
 
 from XPPython3 import xp
 
 from fmscompanion.models import ProcedureInfo
+
+# Maximum distance (nm) a resolved navaid may be from the airport centre before
+# we consider it a name conflict and reject it.  Procedures rarely span more than
+# 200 nm; 500 nm is a generous safety margin that still excludes global conflicts.
+_MAX_PROC_FIX_DIST_NM = 500.0
+
+
+def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 3440.065
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + (
+        math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    )
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 class ProceduresMixin:
@@ -517,6 +533,37 @@ class ProceduresMixin:
         else:
             self._proc_refresh()
 
+    def _find_proc_navaid(self, ident: str, center_lat, center_lon):
+        """Resolve a procedure fix ident to a navaid ref, rejecting results that are
+        unreasonably far from the airport (global name conflicts in Navigraph data).
+
+        Falls back through Fix → VOR → NDB → Airport.  If the closest match of any
+        type is further than _MAX_PROC_FIX_DIST_NM from the airport, returns
+        xp.NAV_NOT_FOUND so the fix is skipped rather than inserted at wrong coords.
+        """
+        search_types = [xp.Nav_Fix, xp.Nav_VOR, xp.Nav_NDB, xp.Nav_Airport]
+        for nav_type in search_types:
+            ref = xp.findNavAid(None, ident, center_lat, center_lon, None, nav_type)
+            if ref == xp.NAV_NOT_FOUND:
+                continue
+            # Proximity check — only applies when we have an airport centre point
+            if center_lat is not None and center_lon is not None:
+                try:
+                    info = xp.getNavAidInfo(ref)
+                    nav_lat = getattr(info, "latitude",  0.0)
+                    nav_lon = getattr(info, "longitude", 0.0)
+                    dist = _haversine_nm(center_lat, center_lon, nav_lat, nav_lon)
+                    if dist > _MAX_PROC_FIX_DIST_NM:
+                        self._log(
+                            f"  skip '{ident}': resolved {dist:.0f} nm from airport "
+                            f"({nav_lat:.2f}, {nav_lon:.2f}) — likely name conflict"
+                        )
+                        continue   # try next type; if all are too far, falls through to NAV_NOT_FOUND
+                except Exception:
+                    pass
+            return ref
+        return xp.NAV_NOT_FOUND
+
     def _cmd_proc_activate(self, kind: str) -> None:
         """Insert selected procedure waypoints into the FMS."""
         transitions = self._proc_transitions(kind)
@@ -543,13 +590,7 @@ class ProceduresMixin:
 
         proc_nav = []
         for ident in proc.waypoints:
-            ref = xp.findNavAid(None, ident, apt_lat, apt_lon, None, xp.Nav_Fix)
-            if ref == xp.NAV_NOT_FOUND:
-                ref = xp.findNavAid(None, ident, apt_lat, apt_lon, None, xp.Nav_VOR)
-            if ref == xp.NAV_NOT_FOUND:
-                ref = xp.findNavAid(None, ident, apt_lat, apt_lon, None, xp.Nav_NDB)
-            if ref == xp.NAV_NOT_FOUND:
-                ref = xp.findNavAid(None, ident, None, None, None, xp.Nav_Airport)
+            ref = self._find_proc_navaid(ident, apt_lat, apt_lon)
             proc_nav.append((ref, ident))
 
         write_idx = 0

@@ -546,8 +546,8 @@ class ProceduresMixin:
             ref = xp.findNavAid(None, ident, center_lat, center_lon, None, nav_type)
             if ref == xp.NAV_NOT_FOUND:
                 continue
-            # Proximity check — only applies when we have an airport centre point
             if center_lat is not None and center_lon is not None:
+                # Proximity check — reject navaids further than the threshold.
                 try:
                     info = xp.getNavAidInfo(ref)
                     nav_lat = getattr(info, "latitude",  0.0)
@@ -558,9 +558,14 @@ class ProceduresMixin:
                             f"  skip '{ident}': resolved {dist:.0f} nm from airport "
                             f"({nav_lat:.2f}, {nav_lon:.2f}) — likely name conflict"
                         )
-                        continue   # try next type; if all are too far, falls through to NAV_NOT_FOUND
+                        continue
                 except Exception:
                     pass
+            else:
+                # No airport centre — only trust airport-type lookups; reject all
+                # others to avoid global name conflicts with Navigraph data.
+                if nav_type != xp.Nav_Airport:
+                    continue
             return ref
         return xp.NAV_NOT_FOUND
 
@@ -579,14 +584,21 @@ class ProceduresMixin:
         apt_lat, apt_lon = None, None
         apt_icao = self._proc_airport_for(kind)
         if apt_icao:
-            apt_ref = xp.findNavAid(None, apt_icao, None, None, None, xp.Nav_Airport)
-            if apt_ref != xp.NAV_NOT_FOUND:
-                try:
-                    apt_info = xp.getNavAidInfo(apt_ref)
-                    apt_lat = apt_info.latitude
-                    apt_lon = apt_info.longitude
-                except Exception:
-                    pass
+            # Try multiple nav types — some simulators/navdata sets index airports
+            # under different types, or the ICAO might also match a VOR/NDB.
+            for _apt_type in (xp.Nav_Airport, xp.Nav_Fix, xp.Nav_VOR, xp.Nav_NDB):
+                apt_ref = xp.findNavAid(None, apt_icao, None, None, None, _apt_type)
+                if apt_ref != xp.NAV_NOT_FOUND:
+                    try:
+                        apt_info = xp.getNavAidInfo(apt_ref)
+                        apt_lat = apt_info.latitude
+                        apt_lon = apt_info.longitude
+                        break
+                    except Exception:
+                        pass
+            if apt_lat is None:
+                self._log(f"proc_activate({kind}): WARNING could not resolve airport"
+                          f" '{apt_icao}' — proximity check disabled for this insertion")
 
         proc_nav = []
         for ident in proc.waypoints:

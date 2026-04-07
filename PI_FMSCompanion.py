@@ -57,7 +57,7 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         "X-Plane FMS Companion: flight plan loader, procedure browser (SID/STAR/APP), "
         "scrollable LEGS list with waypoint activation/direct-to, and live NAV data display."
     )
-    RELEASE = "0.1.0"
+    RELEASE = __import__("fmscompanion").__version__
 
     # Command prefix used by _create_command when no explicit prefix is given
     CMD_PREFIX = "fmscompanion"

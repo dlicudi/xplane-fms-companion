@@ -127,7 +127,8 @@ class UIMixin:
                 refCon=None,
                 visible=1,
             )
-            self._ui_window.setTitle("FMS Companion")
+            from fmscompanion import __version__
+            self._ui_window.setTitle(f"FMS Companion  v{__version__}")
         except Exception as exc:
             self._log("UI: failed to create window:", exc)
 

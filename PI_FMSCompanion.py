@@ -21,9 +21,11 @@ Package layout (fmscompanion/):
   ui.py           — Dear ImGui window and tab layout
 """
 
+import json
 import os
 import sys
 import time
+from datetime import datetime  # noqa: F401 — used in _cmd_dump_state
 from typing import Dict, List, Optional
 
 # Make the fmscompanion package importable when deployed as a flat copy alongside
@@ -159,6 +161,7 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
             "map_mode":         "",
             "status":           "INIT",
             "last_error":       "",
+            "last_dump":        "",
         }
         self.int_values: Dict[str, int] = {
             "index":             0,
@@ -375,6 +378,130 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         super()._cmd_load()
         self._run_validation()
         self._cmd_wind_refresh()
+
+    # ── State dump ────────────────────────────────────────────────────────────
+
+    def _cmd_dump_state(self) -> str:
+        """Write a JSON snapshot of all plugin state to Output/FMSCompanion/.
+
+        Returns the file path on success, empty string on failure.
+        """
+        try:
+            out_dir = os.path.join(xp.getSystemPath(), "Output", "FMSCompanion")
+            os.makedirs(out_dir, exist_ok=True)
+            ts   = datetime.now()
+            path = os.path.join(out_dir, f"dump_{ts.strftime('%Y%m%d_%H%M%S')}.json")
+
+            data = {
+                "timestamp":      ts.isoformat(timespec="seconds"),
+                "plugin_version": self.RELEASE,
+                "plan":           self._dump_plan(),
+                "fms_entries":    self._dump_fms_entries(),
+                "nav":            self._dump_nav(),
+                "fuel": {
+                    "on_board_kg": round(self.fuel_on_board_kg, 2),
+                    "flow_kg_s":   round(self.fuel_flow_kg_s,   4),
+                    "flow_kg_hr":  round(self.fuel_flow_kg_s * 3600, 1),
+                },
+                "wind": {
+                    "dep_icao":     self.proc_dep_icao  or "",
+                    "dep_metar":    self.dep_wind_metar  or "",
+                    "dep_wind_dir": self.dep_wind_dir,
+                    "dep_wind_spd": self.dep_wind_spd,
+                    "dep_ranking":  self.dep_runway_ranking,
+                    "dep_sids":     self.dep_recommended_sids,
+                    "arr_icao":     self.proc_dest_icao  or "",
+                    "arr_metar":    self.wind_metar       or "",
+                    "arr_wind_dir": self.wind_dir,
+                    "arr_wind_spd": self.wind_spd,
+                    "arr_ranking":  self.wind_runway_ranking,
+                    "arr_apps":     self.arr_recommended_apps,
+                    "arr_stars":    self.arr_recommended_stars,
+                },
+                "validation_issues": [
+                    {"severity": v.severity, "code": v.code,
+                     "message": v.message, "affected_index": v.affected_index,
+                     "suggestion": v.suggestion}
+                    for v in self.validation_issues
+                ],
+                "procedures_loaded": {k: self._proc_loaded.get(k, "") for k in self.KINDS},
+                "nav_advisories":    list(self.nav_advisories),
+            }
+
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=str)
+
+            self._log("Dump written:", path)
+            self.string_values["last_dump"] = os.path.basename(path)
+            return path
+
+        except Exception as exc:
+            self._log("Dump error:", exc)
+            return ""
+
+    def _dump_plan(self) -> dict:
+        plan = self._selected_plan()
+        if not plan:
+            return {}
+        return {
+            "filename":    plan.filename,
+            "dep":         plan.dep,
+            "dest":        plan.dest,
+            "sid":         plan.sid,
+            "star":        plan.star,
+            "waypoints":   plan.waypoint_count,
+            "distance_nm": round(plan.total_distance_nm, 1),
+            "max_alt_ft":  plan.max_altitude,
+        }
+
+    def _dump_fms_entries(self) -> list:
+        entries = []
+        try:
+            count  = xp.countFMSEntries()
+            active = xp.getDestinationFMSEntry()
+            for i in range(count):
+                info = self._safe_fms_entry_info(i)
+                if not info:
+                    continue
+                lat = getattr(info, "latitude",  None) or getattr(info, "lat",  None) or 0.0
+                lon = getattr(info, "longitude", None) or getattr(info, "lon",  None) or 0.0
+                entries.append({
+                    "index":    i,
+                    "ident":    info.navAidID or "",
+                    "type":     info.type,
+                    "altitude": info.altitude,
+                    "lat":      round(lat, 6),
+                    "lon":      round(lon, 6),
+                    "active":   i == active,
+                })
+        except Exception as exc:
+            entries.append({"error": str(exc)})
+        return entries
+
+    def _dump_nav(self) -> dict:
+        def _getf(key):
+            ref = self._nav_drefs.get(key) if self._nav_drefs else None
+            if not ref:
+                return None
+            try:
+                return round(xp.getDataf(ref), 3)
+            except Exception:
+                return None
+
+        return {
+            "active_ident": self._read_fms_active_ident(),
+            "active_index": self._read_fms_active_index(),
+            "entry_count":  self._read_fms_entry_count(),
+            "xtk_dots":     _getf("xtk"),
+            "gs_kt":        _getf("gs"),
+            "dtk_deg":      _getf("dtk"),
+            "trk_deg":      _getf("trk"),
+            "dis_nm":       _getf("dis"),
+            "ete_min":      _getf("ete"),
+            "brg_deg":      _getf("brg"),
+            "eta_h":        _getf("eta_h"),
+            "eta_m":        _getf("eta_m"),
+        }
 
     # ── Command registration (used by UIMixin._ui_register_command only) ──
 

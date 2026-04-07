@@ -24,6 +24,8 @@ try:
 except ImportError:
     _HAS_IMGUI = False
 
+import os
+
 from XPPython3 import xp
 from fmscompanion.models import SEVERITY_ERROR, SEVERITY_WARN
 
@@ -162,6 +164,15 @@ class UIMixin:
         if err:
             imgui.same_line()
             imgui.text_colored(f"  {err}", *_COL_RED)
+        imgui.same_line()
+        if imgui.button("Dump##statusdump"):
+            path = self._cmd_dump_state()
+            if path:
+                self.string_values["last_dump"] = os.path.basename(path)
+        last_dump = self.string_values.get("last_dump", "")
+        if last_dump:
+            imgui.same_line()
+            imgui.text_colored(last_dump, *_COL_DIM)
 
         imgui.separator()
 

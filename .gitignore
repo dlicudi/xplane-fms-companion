@@ -1,2 +1,3 @@
 settings.local.json
 *.pyc
+.DS_Store

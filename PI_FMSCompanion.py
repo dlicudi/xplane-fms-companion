@@ -112,9 +112,26 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         }
         self.map_cmd_refs: Dict[int, tuple] = {}
 
+        # ── Avionics auto-detection (probed in XPluginStart) ──
+        # fpl_command_ref is used by the "Open FPL" button; avionics_name is
+        # surfaced in the UI so the button label reflects the actual aircraft.
+        self.fpl_command_ref = None
+        self.avionics_name   = "FMS"
+
         # ── LEGS state ──
         self.legs_selected    = -1
         self.legs_window_start = 0
+
+        # ── Route entry (LOAD tab, typed routes) ──
+        self.route_entry_text:   str = ""
+        self.route_entry_parsed: list = []   # list[ParsedToken], populated by PARSE
+        self.route_entry_status: str = ""
+
+        # ── Simbrief integration ──
+        self.simbrief_id:        str = ""
+        self._simbrief_fetching: bool = False
+        self._simbrief_result:   object = None   # (route_str, error_str) | None
+        self._simbrief_error:    str = ""
 
         # ── Plan browser scroll/sort state ──
         self.browser_list_window_start = 0
@@ -370,11 +387,12 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
 
     @staticmethod
     def _rwy_num(rwy_id: str) -> str:
-        """Strip all trailing letters from a runway id, returning just the digits.
-        Works for L/R/C suffixes and CIFP variant letters (B, D, G, …).
-        E.g. "06B" → "06", "28L" → "28", "27" → "27".
+        """Return just the leading runway digits from a runway id.
+
+        Handles standard suffixes plus CIFP variants like "11-Y" or "06B".
         """
-        return _re.sub(r'[A-Za-z]+$', '', rwy_id.strip())
+        match = _re.match(r'^\s*(\d{1,2})', rwy_id.strip().upper())
+        return match.group(1).zfill(2) if match else ""
 
     def _cmd_wind_refresh(self):
         """Fetch METAR for both DEP and DEST, rank runways, recommend procedures."""
@@ -391,6 +409,12 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         self.dep_wind_spd = spd
         self._log(f"wind_refresh DEP {icao}: metar={bool(metar)} dir={dir_} spd={spd}")
 
+        # Mirror _wind_refresh_arr: if the procedure cache is empty for this
+        # airport, refresh before ranking — otherwise SIDs are invisible and
+        # we silently produce no advisory.
+        if icao and not self._proc_procs.get("dep"):
+            self._proc_refresh()
+
         # DEP procedures share a physical runway (e.g. "06B"/"06C" → both runway 06)
         # Deduplicate to unique numeric runway IDs before ranking.
         seen: set = set()
@@ -406,10 +430,23 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         else:
             self.dep_runway_ranking = []
 
-        # SIDs for the best departure runway, filtered by route connectivity.
-        # A SID is a good connector if its last waypoint appears in the FMS route.
+        # Pick the best DEP runway: wind ranking → plan hint → first runway
+        # with SIDs. Fallback mirrors _best_arrival_runway so we still give
+        # advice when METAR is unavailable or wind is VRB/calm.
+        best_num = ""
         if self.dep_runway_ranking:
             best_num = self._rwy_num(self.dep_runway_ranking[0][0])
+        else:
+            plan = self._selected_plan()
+            plan_rwy = (getattr(plan, "dep_runway", "") or "").strip().upper()
+            if plan_rwy:
+                best_num = self._rwy_num(plan_rwy)
+            elif rwy_ids:
+                best_num = rwy_ids[0]
+
+        # SIDs for the best departure runway, filtered by route connectivity.
+        # A SID is a good connector if its last waypoint appears in the FMS route.
+        if best_num:
             route = self._route_idents()
             runway_sids = [
                 proc for proc in self._proc_procs.get("dep", [])
@@ -426,6 +463,58 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         else:
             self.dep_recommended_sids = []
 
+    def _best_arrival_runway(self) -> str:
+        """Choose the best arrival runway from wind, plan hints, or procedure connectivity."""
+        if self.wind_runway_ranking:
+            return self.wind_runway_ranking[0][0]
+
+        plan = self._selected_plan()
+        plan_rwy = (getattr(plan, "dest_runway", "") or "").strip().upper()
+        if plan_rwy:
+            return plan_rwy
+
+        route = self._route_idents()
+        candidates: Dict[str, dict] = {}
+
+        for proc in self._proc_procs.get("app", []):
+            rwy = (proc.display_runway or "").strip().upper()
+            if not rwy:
+                continue
+            bucket = candidates.setdefault(rwy, {"app_connected": 0, "star_connected": 0, "apps": 0, "stars": 0})
+            bucket["apps"] += 1
+            if (proc.transition and proc.transition in route) or (proc.waypoints and proc.waypoints[0] in route):
+                bucket["app_connected"] += 1
+
+        for proc in self._proc_procs.get("arr", []):
+            name = (proc.display_name or "").upper()
+            for rwy, bucket in candidates.items():
+                if f"RW{self._rwy_num(rwy)}" not in name:
+                    continue
+                bucket["stars"] += 1
+                if (proc.transition and proc.transition in route) or (proc.waypoints and proc.waypoints[0] in route):
+                    bucket["star_connected"] += 1
+
+        if candidates:
+            ranked = sorted(
+                candidates.items(),
+                key=lambda item: (
+                    item[1]["app_connected"],
+                    item[1]["star_connected"],
+                    item[1]["apps"],
+                    item[1]["stars"],
+                    item[0],
+                ),
+                reverse=True,
+            )
+            return ranked[0][0]
+
+        app_runways = sorted({
+            (proc.display_runway or "").strip().upper()
+            for proc in self._proc_procs.get("app", [])
+            if (proc.display_runway or "").strip()
+        })
+        return app_runways[0] if app_runways else ""
+
     def _wind_refresh_arr(self):
         icao = (self.proc_dest_icao or "").strip().upper()
         metar = fetch_metar(icao) if icao else ""
@@ -434,6 +523,11 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         self.wind_dir = dir_
         self.wind_spd = spd
         self._log(f"wind_refresh ARR {icao}: metar={bool(metar)} dir={dir_} spd={spd}")
+
+        # If the procedure cache is stale or was never populated for this airport,
+        # refresh before attempting runway/app recommendations.
+        if icao and not self._proc_procs.get("app") and not self._proc_procs.get("arr"):
+            self._proc_refresh()
 
         # APP procedures have full runway IDs ("28L", "28R") — keep them distinct.
         seen: set = set()
@@ -449,26 +543,30 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         else:
             self.wind_runway_ranking = []
 
-        # APPs for the best arrival runway (exact match, then numeric fallback)
-        if self.wind_runway_ranking:
-            best_rwy = self.wind_runway_ranking[0][0]       # e.g. "28L"
-            best_num = self._rwy_num(best_rwy)              # e.g. "28"
+        # APPs for the best arrival runway (exact match, then numeric fallback).
+        # When wind does not yield a runway (VRB/calm/missing), fall back to the
+        # plan's destination runway or procedure connectivity.
+        best_rwy = self._best_arrival_runway()
+        best_num = self._rwy_num(best_rwy) if best_rwy else ""
+        if best_rwy:
             self.arr_recommended_apps = [
                 (proc.display_name, proc.display_runway)
                 for proc in self._proc_procs.get("app", [])
-                if proc.display_runway == best_rwy
-                or (not best_rwy[-1:].isalpha() and
-                    self._rwy_num(proc.display_runway or "") == best_num)
+                if (proc.display_runway or "").strip().upper() == best_rwy
+                or (
+                    best_num
+                    and not best_rwy[-1:].isalpha()
+                    and self._rwy_num(proc.display_runway or "") == best_num
+                )
             ]
         else:
             self.arr_recommended_apps = []
 
         # STARs — only recommend those serving the best arrival runway,
         # further filtered by route connectivity (entry fix must be in FMS route).
-        # If wind is variable/calm (no clear best runway), show no recommendations.
         seen_names: set = set()
         stars_rwy: list = []
-        best_rwy_num = self._rwy_num(self.wind_runway_ranking[0][0]) if self.wind_runway_ranking else ""
+        best_rwy_num = self._rwy_num(best_rwy)
         for proc in self._proc_procs.get("arr", []):
             if proc.name in seen_names:
                 continue
@@ -528,6 +626,7 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
             data = {
                 "version": 1,
                 "plan_filename": plan.filename if plan else "",
+                "simbrief_id":   self.simbrief_id,
                 "proc_dep_icao": self.proc_dep_icao,
                 "proc_dest_icao": self.proc_dest_icao,
                 "proc_loaded":   dict(self._proc_loaded),
@@ -573,6 +672,8 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
                     if plan.filename == filename:
                         self.index = i
                         break
+
+            self.simbrief_id = data.get("simbrief_id", "")
 
             # Restore airports and reload CIFP
             dep  = data.get("proc_dep_icao",  "")
@@ -767,6 +868,31 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         self._cmd_handlers[name] = {"ref": cmd_ref, "handler": handler}
         self._log("Registered command", name)
 
+    # ── Avionics detection ──
+
+    # Probe order matters — first match wins. G1000 is most common in stock
+    # aircraft; GNS 530/430 covers older Cessna/Piper stock planes. Add more
+    # as we learn what specific aircraft expose.
+    _FPL_CANDIDATES = [
+        ("G1000",   "sim/GPS/g1000n1_fpl"),
+        ("G1000",   "sim/GPS/g1000n2_fpl"),
+        ("G1000",   "sim/GPS/g1000n3_fpl"),
+        ("GNS 530", "sim/GPS/g530n1_fpl"),
+        ("GNS 530", "sim/GPS/g530n2_fpl"),
+        ("GNS 430", "sim/GPS/g430n1_fpl"),
+        ("GNS 430", "sim/GPS/g430n2_fpl"),
+    ]
+
+    def _detect_avionics(self):
+        for name, cmd in self._FPL_CANDIDATES:
+            ref = xp.findCommand(cmd)
+            if ref:
+                self.fpl_command_ref = ref
+                self.avionics_name   = name
+                self._log(f"Detected avionics: {name} via {cmd}")
+                return
+        self._log("No known FPL command found — Open FPL button will no-op.")
+
     # ── XPlugin lifecycle ──
 
     def XPluginStart(self):
@@ -776,6 +902,9 @@ class PythonInterface(FmsIOMixin, FmsStateMixin, PlanBrowserMixin, LegsMixin, Pr
         for mode, (down_cmd, up_cmd) in self.map_range_cmds.items():
             self.map_cmd_refs[mode] = (xp.findCommand(down_cmd), xp.findCommand(up_cmd))
             self._log("map range cmds", mode, "->", self.map_cmd_refs[mode])
+
+        # Probe for avionics (picks the FPL command we can drive on this aircraft)
+        self._detect_avionics()
 
         # Register the toggle-window command and build the Plugins menu entry
         self._ui_register_command()

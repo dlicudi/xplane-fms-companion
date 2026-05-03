@@ -163,9 +163,23 @@ class LegsMixin:
         return str(info.altitude)
 
     def _legs_leg_distance_nm(self, row: int) -> float:
-        """Return haversine distance (nm) from the previous FMS entry to this row's entry.
-        Returns -1.0 if either entry is missing or has unresolved coordinates."""
         idx = self._legs_fms_index_for_row(row)
+        if idx < 0:
+            return -1.0
+
+        # G1000-style behavior: the active leg distance is live distance-to-waypoint.
+        try:
+            if idx == xp.getDestinationFMSEntry():
+                nav_drefs = getattr(self, "_nav_drefs", None) or {}
+                ref = nav_drefs.get("dis")
+                if ref:
+                    dis = xp.getDataf(ref)
+                    if dis >= 0:
+                        return float(dis)
+        except Exception:
+            pass
+
+        # Non-active rows keep the leg-to-leg plan distance.
         if idx <= 0:
             return -1.0
         cur  = self._safe_fms_entry_info(idx)

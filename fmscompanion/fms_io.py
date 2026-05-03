@@ -259,12 +259,137 @@ class FmsIOMixin:
             self._entry_parse_cache[cache_key] = entries
         return entries
 
+    def _read_plan_text(self, path: str) -> str:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+
     # ── XP FMS write helpers ──
 
     def _clear_fms(self):
         count = xp.countFMSEntries()
         for index in range(count - 1, -1, -1):
             xp.clearFMSEntry(index)
+
+    def _load_fms_plan_text(self, plan_text: str, source: str = "") -> bool:
+        """Load an X-Plane 11+ .fms buffer through the native flight-plan API.
+
+        This lets X-Plane/G1000 resolve airport identifiers from the plan text
+        instead of forcing us through findNavAid() + setFMSEntryInfo(), which can
+        expose internal X-prefixed airport records such as XEDDB.
+        """
+        loader = getattr(xp, "loadFMSFlightPlan", None)
+        if not loader:
+            return False
+        try:
+            loader(0, plan_text)
+            self._log("Loaded FMS plan via loadFMSFlightPlan", source or "<buffer>")
+            return True
+        except Exception as exc:
+            self._log("loadFMSFlightPlan failed", source or "<buffer>", exc)
+            return False
+
+    @staticmethod
+    def _fms_line(entry: FlightPlanEntry, route_tag: str) -> str:
+        ident = (entry.ident or "----").strip().upper()
+        tag = (route_tag or "DRCT").strip().upper()
+        return (
+            f"{entry.entry_type} {ident} {tag} {float(entry.altitude):.6f} "
+            f"{entry.lat:.6f} {entry.lon:.6f}"
+        )
+
+    def _build_route_entry_fms_text(self, parsed) -> str:
+        ok_tokens = [t for t in parsed if getattr(t, "entry", None) is not None]
+        if not ok_tokens:
+            return ""
+
+        dep = ok_tokens[0].entry.ident if ok_tokens[0].entry.entry_type == 1 else ""
+        dest = ok_tokens[-1].entry.ident if ok_tokens[-1].entry.entry_type == 1 else ""
+        lines = ["I", "1100 Version"]
+        if dep:
+            lines.append(f"ADEP {dep}")
+        if dest:
+            lines.append(f"ADES {dest}")
+        lines.append(f"NUMENR {len(ok_tokens)}")
+
+        last_idx = len(ok_tokens) - 1
+        for i, token in enumerate(ok_tokens):
+            entry = token.entry
+            if i == 0 and entry.entry_type == 1:
+                route_tag = "ADEP"
+            elif i == last_idx and entry.entry_type == 1:
+                route_tag = "ADES"
+            else:
+                msg = (getattr(token, "message", "") or "").strip()
+                route_tag = msg[4:].strip().upper() if msg.startswith("via ") else "DRCT"
+            lines.append(self._fms_line(entry, route_tag))
+
+        return "\n".join(lines) + "\n"
+
+    def _write_entries_into_fms(self, entries: List[FlightPlanEntry]) -> None:
+        self._clear_fms()
+        for index, entry in enumerate(entries):
+            self._load_entry_into_fms(index, entry)
+
+    def _clear_fms_flight_plan(self, flight_plan) -> None:
+        count_fn = getattr(xp, "countFMSFlightPlanEntries", None)
+        clear_fn = getattr(xp, "clearFMSFlightPlanEntry", None)
+        if not count_fn or not clear_fn:
+            return
+        count = count_fn(flight_plan)
+        for index in range(count - 1, -1, -1):
+            clear_fn(flight_plan, index)
+
+    def _write_route_entry_into_flight_plan(self, entries: List[FlightPlanEntry]) -> bool:
+        """Write typed routes through the XP12 flight-plan entry API.
+
+        EDDB's airport navref can display as XEDDB. For typed routes, prefer
+        named lat/lon entries so the visible G1000 rows use the literal idents
+        the user parsed, rather than X-Plane's nav database aliases.
+        """
+        set_info = getattr(xp, "setFMSFlightPlanEntryInfo", None)
+        set_latlon_id = getattr(xp, "setFMSFlightPlanEntryLatLonWithId", None)
+        set_latlon = getattr(xp, "setFMSFlightPlanEntryLatLon", None)
+        if not set_info or not set_latlon_id or not set_latlon:
+            return False
+
+        flight_plan = getattr(xp, "Fpl_Pilot_Primary", 0)
+
+        try:
+            self._clear_fms_flight_plan(flight_plan)
+            for index, entry in enumerate(entries):
+                ident = (entry.ident or "").strip().upper()
+                nav_type = self.FMS_TYPE_TO_NAV.get(entry.entry_type)
+
+                # For custom route rows, display fidelity matters more than
+                # preserving every navref. The G1000 can resolve/direct-to named
+                # lat/lon rows, and this avoids EDDB -> XEDDB.
+                if 0 < index < len(entries) - 1:
+                    set_latlon_id(flight_plan, index, entry.lat, entry.lon, entry.altitude, ident)
+                    continue
+
+                if nav_type == xp.Nav_LatLon:
+                    set_latlon_id(flight_plan, index, entry.lat, entry.lon, entry.altitude, ident)
+                    continue
+
+                nav_ref = xp.NAV_NOT_FOUND
+                if nav_type is not None:
+                    nav_ref = xp.findNavAid(None, ident, entry.lat, entry.lon, None, nav_type)
+
+                if nav_ref != xp.NAV_NOT_FOUND and self._nav_matches_position(nav_ref, entry):
+                    set_info(flight_plan, index, nav_ref, entry.altitude)
+                else:
+                    set_latlon_id(flight_plan, index, entry.lat, entry.lon, entry.altitude, ident)
+
+            self._log("Route entry loaded via FMSFlightPlan entry API:", len(entries), "entries")
+            return True
+        except Exception as exc:
+            self._log("FMSFlightPlan entry API failed:", exc)
+            return False
+
+    # Max distance between the .fms-file coord and the SDK's resolved navaid.
+    # Same idents exist across regions (GRICE: Scotland and Louisiana); catches
+    # cross-ocean ambiguity without tripping on routine nav-db coordinate drift.
+    _NAV_MATCH_TOLERANCE_NM = 25.0
 
     def _load_entry_into_fms(self, index: int, entry: FlightPlanEntry):
         nav_type = self.FMS_TYPE_TO_NAV.get(entry.entry_type)
@@ -273,15 +398,63 @@ class FmsIOMixin:
             return
 
         nav_ref = xp.NAV_NOT_FOUND
-        if nav_type is not None:
-            nav_ref = xp.findNavAid(None, entry.ident, None, None, None, nav_type)
 
-        if nav_ref != xp.NAV_NOT_FOUND:
+        if nav_type == xp.Nav_Airport:
+            # Some airports are stored in the navaid database with an internal
+            # "X" prefix (e.g. "XEDDB" for EDDB) due to custom scenery layering.
+            # Try Fix/VOR/NDB first — many airports have their ICAO code as a
+            # named fix at the threshold, which displays without the X prefix.
+            for try_type in (xp.Nav_Fix, xp.Nav_VOR, xp.Nav_NDB):
+                candidate = xp.findNavAid(None, entry.ident, entry.lat, entry.lon, None, try_type)
+                if candidate == xp.NAV_NOT_FOUND:
+                    continue
+                try:
+                    cinfo = xp.getNavAidInfo(candidate)
+                    cid = (getattr(cinfo, "navAidID", "") or "").strip().upper()
+                except Exception:
+                    continue
+                if cid == entry.ident and self._nav_matches_position(candidate, entry):
+                    nav_ref = candidate
+                    break
+            # Fall back to the airport navaid ref (may display as "XEDDB").
+            if nav_ref == xp.NAV_NOT_FOUND:
+                nav_ref = xp.findNavAid(None, entry.ident, entry.lat, entry.lon, None, nav_type)
+        elif nav_type is not None:
+            # Pass lat/lon so the SDK returns the NEAREST match of that type —
+            # without it, duplicate idents resolve to whichever row comes first.
+            nav_ref = xp.findNavAid(None, entry.ident, entry.lat, entry.lon, None, nav_type)
+
+        if nav_ref != xp.NAV_NOT_FOUND and self._nav_matches_position(nav_ref, entry):
             xp.setFMSEntryInfo(index, nav_ref, entry.altitude)
             return
 
         self._log("FMS nav lookup fallback", entry.ident, entry.entry_type, entry.lat, entry.lon)
         xp.setFMSEntryLatLon(index, entry.lat, entry.lon, entry.altitude)
+
+    def _nav_matches_position(self, nav_ref, entry: FlightPlanEntry) -> bool:
+        """Reject a nav match whose position is more than _NAV_MATCH_TOLERANCE_NM
+        from the entry's coords — the SDK returned a different navaid than the
+        .fms file intended, so fall back to a raw lat/lon entry."""
+        try:
+            info = xp.getNavAidInfo(nav_ref)
+        except Exception:
+            return False
+        lat = getattr(info, "latitude", None)
+        if lat is None:
+            lat = getattr(info, "lat", None)
+        lon = getattr(info, "longitude", None)
+        if lon is None:
+            lon = getattr(info, "lon", None)
+        if lat is None or lon is None:
+            return False
+        dist_nm = self._haversine_nm(float(lat), float(lon), entry.lat, entry.lon)
+        if dist_nm > self._NAV_MATCH_TOLERANCE_NM:
+            self._log(
+                f"Nav match too far for {entry.ident}: {dist_nm:.1f} nm "
+                f"from .fms coords — using LatLon fallback"
+            )
+            return False
+        return True
 
     # ── Plan navigation commands ──
 
@@ -363,9 +536,14 @@ class FmsIOMixin:
                 self._publish_state()
                 return
 
-            self._clear_fms()
-            for index, entry in enumerate(entries):
-                self._load_entry_into_fms(index, entry)
+            loaded_via_plan = False
+            try:
+                plan_text = self._read_plan_text(plan.full_path)
+                loaded_via_plan = self._load_fms_plan_text(plan_text, plan.filename)
+            except Exception as exc:
+                self._log("Could not read FMS plan text", plan.filename, exc)
+            if not loaded_via_plan:
+                self._write_entries_into_fms(entries)
 
             xp.setDisplayedFMSEntry(0)
             active_idx = 0
@@ -396,12 +574,179 @@ class FmsIOMixin:
 
         self._publish_state()
 
+    # ── Route entry (typed routes) ──────────────────────────────────────────
+
+    def _aircraft_position(self):
+        """Return (lat, lon) of the user aircraft, or (None, None) if unavailable."""
+        try:
+            lat_ref = xp.findDataRef("sim/flightmodel/position/latitude")
+            lon_ref = xp.findDataRef("sim/flightmodel/position/longitude")
+            if not lat_ref or not lon_ref:
+                return (None, None)
+            return (float(xp.getDataf(lat_ref)), float(xp.getDataf(lon_ref)))
+        except Exception:
+            return (None, None)
+
+    def _cmd_simbrief_fetch(self):
+        if self._simbrief_fetching or not self.simbrief_id.strip():
+            return
+        from fmscompanion import simbrief
+        self._simbrief_fetching = True
+        self._simbrief_result = None
+
+        def _on_done(route, error):
+            self._simbrief_result = (route, error)
+            self._simbrief_fetching = False
+
+        simbrief.fetch_route(self.simbrief_id, _on_done)
+
+    def _cmd_route_entry_parse(self):
+        """Parse self.route_entry_text into self.route_entry_parsed.
+
+        Seeds the chained-position lookup with aircraft position so the first
+        middle token resolves to a nearby match instead of whichever same-ident
+        fix the nav db yields first.
+        """
+        import importlib
+        from fmscompanion import airway_db, route_parser
+        importlib.reload(airway_db)
+        importlib.reload(route_parser)
+        parse_route_string = route_parser.parse_route_string
+        lat, lon = self._aircraft_position()
+        self.route_entry_parsed = parse_route_string(self.route_entry_text,
+                                                     hint_lat=lat, hint_lon=lon)
+        ok    = sum(1 for t in self.route_entry_parsed if t.status == "ok")
+        total = sum(1 for t in self.route_entry_parsed if t.category != "filler")
+        self.route_entry_status = f"{ok}/{total} resolved" if total else ""
+
+    def _cmd_route_entry_load(self):
+        """Load the resolved waypoints into the X-Plane FMS.
+
+        Skipped tokens (airways, procedures, unknown) are ignored — procedures
+        can be applied via the DEP/ARR/APP tabs after the base route is loaded.
+        """
+        parsed = self.route_entry_parsed
+        airports = [t for t in parsed if t.category == "airport"]
+        if len(airports) < 2 or airports[0].status != "ok" or airports[-1].status != "ok":
+            missing = []
+            if not airports or airports[0].status != "ok":
+                missing.append("departure")
+            if len(airports) < 2 or airports[-1].status != "ok":
+                missing.append("arrival")
+            self._set_status("LOAD ERR", f"Unresolved airport: {', '.join(missing)}")
+            self._publish_state()
+            return
+
+        entries = [t.entry for t in parsed if t.entry is not None]
+        if not entries:
+            self._set_status("LOAD ERR", "No resolvable waypoints — PARSE first")
+            self._publish_state()
+            return
+
+        try:
+            # Prefer loading via .fms text buffer as it correctly sets ADEP/ADES
+            # (Origin/Destination) in the FMS header.
+            fms_text = self._build_route_entry_fms_text(parsed)
+            if fms_text and self._load_fms_plan_text(fms_text, "CUSTOM"):
+                pass
+            elif not self._write_route_entry_into_flight_plan(entries):
+                self._write_entries_into_fms(entries)
+
+            xp.setDisplayedFMSEntry(0)
+            active_idx = 1 if len(entries) > 1 and entries[0].entry_type == 1 else 0
+            xp.setDestinationFMSEntry(min(active_idx, len(entries) - 1))
+
+            total_dist = sum(
+                self._haversine_nm(entries[i - 1].lat, entries[i - 1].lon,
+                                   entries[i].lat, entries[i].lon)
+                for i in range(1, len(entries))
+            )
+
+            self.loaded = 1
+            self.loaded_filename    = "CUSTOM"
+            self.loaded_sid         = ""
+            self.loaded_star        = ""
+            self.loaded_distance_nm = round(total_dist, 1)
+            self._set_status("LOADED")
+            self._legs_init_after_load()
+
+            # Refresh procedures for new dep/dest so the DEP/ARR/APP tabs
+            # are populated for any SID/STAR/APP the user wants to add next.
+            new_dep  = entries[0].ident  if entries[0].entry_type  == 1 else ""
+            new_dest = entries[-1].ident if entries[-1].entry_type == 1 else ""
+            if new_dep != self.proc_dep_icao or new_dest != self.proc_dest_icao:
+                self.proc_dep_icao  = new_dep
+                self.proc_dest_icao = new_dest
+                self._proc_refresh()
+
+            if hasattr(self, "_sync_route_state"):
+                self._sync_route_state()
+            if hasattr(self, "_save_state"):
+                self._save_state()
+            self._log("Route entry loaded:", len(entries), "entries")
+        except Exception as exc:
+            self._mark_route_unloaded() if hasattr(self, "_mark_route_unloaded") else None
+            self._set_status("LOAD ERR", str(exc))
+
+        self._publish_state()
+
+    def _cmd_sync_from_fms(self):
+        """Re-derive cached plan state from the live FMS contents.
+
+        Called after manual edits in the native G1000 so the LOAD/NAV/CHECK
+        tabs line up with what's actually in the box — recomputes total
+        distance, re-detects DEP/DEST airports, clears SID/STAR claims
+        (which can no longer be trusted after a manual edit), marks the
+        plan name with a trailing ' *', and re-runs validation + wind.
+        """
+        count = self._read_fms_entry_count()
+        if count <= 0:
+            self._mark_route_unloaded()
+            self._set_status("EMPTY", "FMS has no entries")
+            self._publish_state()
+            return
+
+        entries = self._live_fms_entries()
+        total_dist = 0.0
+        for i in range(1, len(entries)):
+            total_dist += self._haversine_nm(
+                entries[i - 1].lat, entries[i - 1].lon,
+                entries[i].lat, entries[i].lon,
+            )
+
+        # Force endpoint re-detection — user may have swapped DEP or DEST.
+        self.proc_dep_icao = ""
+        self.proc_dest_icao = ""
+        self._proc_airports_from_fms()
+
+        if not self.loaded_filename:
+            self.loaded_filename = "LIVE"
+        elif not self.loaded_filename.endswith(" *"):
+            self.loaded_filename = f"{self.loaded_filename} *"
+        self.loaded_sid = ""
+        self.loaded_star = ""
+        self.loaded_distance_nm = round(total_dist, 1)
+        self.loaded = 1
+
+        self._run_validation()
+        self._wind_refresh_dep()
+        self._wind_refresh_arr()
+        if hasattr(self, "_save_state"):
+            self._save_state()
+
+        self._set_status("SYNCED", f"{len(entries)} entries, {total_dist:.0f} nm")
+        self._log("Synced from FMS:", len(entries), "entries",
+                  f"{total_dist:.1f} nm",
+                  "dep=", self.proc_dep_icao, "dest=", self.proc_dest_icao)
+        self._publish_state()
+
     def _cmd_open_fpl(self):
-        cmd = xp.findCommand("sim/GPS/g1000n1_fpl")
-        if cmd:
-            self._log("Executing sim/GPS/g1000n1_fpl")
-            xp.commandOnce(cmd)
+        ref = getattr(self, "fpl_command_ref", None)
+        if ref:
+            self._log(f"Executing {self.avionics_name} FPL command")
+            xp.commandOnce(ref)
             self._set_status("FPL OPEN")
         else:
-            self._set_status("NO FPL CMD", "sim/GPS/g1000n1_fpl not found")
+            self._set_status("NO FPL CMD",
+                             "No supported FPL command for this aircraft")
         self._publish_state()

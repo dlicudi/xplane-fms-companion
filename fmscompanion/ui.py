@@ -6,12 +6,7 @@ Tabs:
     LOAD     — .fms file browser
     NAV      — live data grid (WPT, XTK, DTK, GS, ETE, BRG, TRK, ETA)
     ROUTE    — active FMS legs list
-    DEP      — SID procedure name browser
-    DEP TR   — SID transition browser for selected procedure
-    ARR      — STAR procedure name browser
-    ARR TR   — STAR transition browser
-    APP      — approach procedure name browser
-    APP TR   — approach transition browser
+    ADVISE   — recommended terminal setup and guidance
 
 Registers a single X-Plane command:
     fmscompanion/toggle_window  — show/hide the window
@@ -32,14 +27,17 @@ from fmscompanion.models import SEVERITY_ERROR, SEVERITY_WARN
 _TAB_LOAD  = 0
 _TAB_NAV   = 1
 _TAB_ROUTE = 2
-_TAB_DEP   = 3
-_TAB_ARR   = 4
-_TAB_APP   = 5
-_TAB_CHECK = 6
-_TAB_FUEL  = 7
-_TAB_WIND  = 8
+_TAB_ADVISE = 3
+_TAB_CHECK = 4
+_TAB_FUEL  = 5
+_TAB_WIND  = 6
+_TAB_PREFS = 7
 
-_TAB_LABELS = ["LOAD", "NAV", "ROUTE", "DEP", "ARR", "APP", "CHECK", "FUEL", "WIND"]
+_TAB_LABELS = ["LOAD", "NAV", "ROUTE", "ADVISE", "CHECK", "FUEL", "WIND", "PREFS"]
+
+_TAB_DEP   = 100
+_TAB_ARR   = 101
+_TAB_APP   = 102
 
 _PROC_KIND_FOR_TAB = {_TAB_DEP: "dep", _TAB_ARR: "arr", _TAB_APP: "app"}
 
@@ -56,16 +54,24 @@ _COL_DIM     = (0.45, 0.45, 0.45, 1.0)
 
 # Sim datarefs used by the NAV grid
 _NAV_DREF_NAMES = {
-    "dis":   "sim/cockpit2/radios/indicators/gps_dme_distance_nm",
-    "ete":   "sim/cockpit2/radios/indicators/gps_dme_time_min",
-    "gs":    "sim/cockpit2/gauges/indicators/ground_speed_kt",
-    "dtk":   "sim/cockpit2/radios/indicators/gps_bearing_deg_mag",
-    "eta_h": "sim/cockpit2/radios/indicators/fms1_act_eta_hour",
-    "eta_m": "sim/cockpit2/radios/indicators/fms1_act_eta_minute",
-    "brg":   "sim/cockpit2/radios/indicators/gps_bearing_deg_mag",
-    "xtk":   "sim/cockpit/radios/gps_course_deviation",
-    "trk":   "sim/cockpit2/gauges/indicators/ground_track_mag_pilot",
+    "dis":    "sim/cockpit2/radios/indicators/gps_dme_distance_nm",
+    "ete":    "sim/cockpit2/radios/indicators/gps_dme_time_min",
+    "gs":     "sim/cockpit2/gauges/indicators/ground_speed_kt",
+    "dtk":    "sim/cockpit2/radios/indicators/gps_bearing_deg_mag",
+    "eta_h":  "sim/cockpit2/radios/indicators/fms1_act_eta_hour",
+    "eta_m":  "sim/cockpit2/radios/indicators/fms1_act_eta_minute",
+    "brg":    "sim/cockpit2/radios/indicators/gps_bearing_deg_mag",
+    "xtk":    "sim/cockpit/radios/gps_course_deviation",
+    "trk":    "sim/cockpit2/gauges/indicators/ground_track_mag_pilot",
+    "ac_lat": "sim/flightmodel/position/latitude",
+    "ac_lon": "sim/flightmodel/position/longitude",
+    "ac_alt": "sim/flightmodel/position/elevation",   # metres MSL
 }
+
+# TOD computation constants
+_TOD_DESCENT_FT_PER_NM   = 318.0   # ≈ 3° glide (318 ft / nm)
+_TOD_PATTERN_ABOVE_FIELD = 1500.0  # target altitude above destination elev
+_METRES_TO_FEET          = 3.28084
 
 
 class UIMixin:
@@ -90,8 +96,13 @@ class UIMixin:
     def _ui_build_menu(self):
         try:
             plugins_menu = xp.findPluginsMenu()
+            # Submenu must attach to an item we own in the Plugins menu —
+            # passing parentItem=0 without appending first hits another
+            # plugin's slot and makes createMenu fail.
+            parent_item = xp.appendMenuItem(plugins_menu, "FMS Companion", 0)
             self._ui_menu_id = xp.createMenu(
-                "FMS Companion", plugins_menu, 0, self._ui_menu_handler, None)
+                "FMS Companion", plugins_menu, parent_item,
+                self._ui_menu_handler, None)
             xp.appendMenuItem(self._ui_menu_id, "Show / Hide FMS Companion Window", "toggle")
         except Exception as exc:
             self._log("UI: failed to create menu:", exc)
@@ -215,18 +226,19 @@ class UIMixin:
             self._ui_draw_nav()
         elif self._ui_tab == _TAB_ROUTE:
             self._ui_draw_route()
+        elif self._ui_tab == _TAB_ADVISE:
+            self._ui_draw_advise()
         elif self._ui_tab == _TAB_CHECK:
             self._ui_draw_check()
         elif self._ui_tab == _TAB_FUEL:
             self._ui_draw_fuel()
         elif self._ui_tab == _TAB_WIND:
             self._ui_draw_wind()
+        elif self._ui_tab == _TAB_PREFS:
+            self._ui_draw_prefs()
         elif self._ui_tab in _PROC_KIND_FOR_TAB:
             kind = _PROC_KIND_FOR_TAB[self._ui_tab]
-            if self._proc_name_idx.get(kind, -1) >= 0:
-                self._ui_draw_proc_trans(kind)
-            else:
-                self._ui_draw_proc_names(kind)
+            self._ui_draw_proc_names(kind)
 
     # ── Dynamic row count ─────────────────────────────────────────────────────
 
@@ -360,6 +372,12 @@ class UIMixin:
 
         imgui.columns(1)
 
+        # TOD advisory — 3° descent to pattern altitude at destination.
+        tod = self._ui_compute_tod()
+        if tod is not None:
+            imgui.separator()
+            self._ui_draw_tod(tod)
+
         # Advisory banner — shown only when there are active advisories
         advisories = getattr(self, "nav_advisories", [])
         if advisories:
@@ -367,10 +385,216 @@ class UIMixin:
             for msg in advisories:
                 imgui.text_colored(f"\u26a0  {msg}", *_COL_RED)
 
+    # ── TOD (top-of-descent) advisory ────────────────────────────────────────
+
+    def _ui_compute_tod(self):
+        """Compute a straight-line top-of-descent advisory relative to the
+        last FMS entry. Returns a dict or None when data is unavailable or
+        the result isn't meaningful (no route, below pattern alt already,
+        on the ground)."""
+        import math
+
+        count = self._read_fms_entry_count()
+        if count <= 0:
+            return None
+
+        self._ui_ensure_nav_drefs()
+        lat_ref = self._nav_drefs.get("ac_lat")
+        lon_ref = self._nav_drefs.get("ac_lon")
+        alt_ref = self._nav_drefs.get("ac_alt")
+        if not (lat_ref and lon_ref and alt_ref):
+            return None
+
+        try:
+            ac_lat    = xp.getDataf(lat_ref)
+            ac_lon    = xp.getDataf(lon_ref)
+            ac_alt_ft = xp.getDataf(alt_ref) * _METRES_TO_FEET
+        except Exception:
+            return None
+
+        dest = self._safe_fms_entry_info(count - 1)
+        if not dest:
+            return None
+        dest_lat = getattr(dest, "latitude", None)
+        if dest_lat is None:
+            dest_lat = getattr(dest, "lat", None)
+        dest_lon = getattr(dest, "longitude", None)
+        if dest_lon is None:
+            dest_lon = getattr(dest, "lon", None)
+        if dest_lat is None or dest_lon is None:
+            return None
+        dest_lat = float(dest_lat)
+        dest_lon = float(dest_lon)
+
+        # Destination field elevation: FMS stores altitude in feet; for airport
+        # entries this is usually 0, so we can't count on it. Treat 0 as unknown
+        # and assume sea level — acceptable for an advisory.
+        dest_elev_ft = float(getattr(dest, "altitude", 0) or 0)
+
+        R_NM = 3440.065
+        dlat = math.radians(dest_lat - ac_lat)
+        dlon = math.radians(dest_lon - ac_lon)
+        a = (math.sin(dlat / 2) ** 2
+             + math.cos(math.radians(ac_lat)) * math.cos(math.radians(dest_lat))
+             * math.sin(dlon / 2) ** 2)
+        dist_to_dest = R_NM * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+        target_alt_ft = dest_elev_ft + _TOD_PATTERN_ABOVE_FIELD
+        alt_to_lose   = ac_alt_ft - target_alt_ft
+        if alt_to_lose <= 0:
+            return None   # already at or below pattern altitude
+
+        tod_dist_from_dest = alt_to_lose / _TOD_DESCENT_FT_PER_NM
+        dist_to_tod        = dist_to_dest - tod_dist_from_dest
+
+        gs = self._nav_getf("gs")
+        time_to_tod_min = (dist_to_tod / gs) * 60.0 if gs >= 40.0 else None
+
+        return {
+            "dist_to_tod":    dist_to_tod,
+            "dist_to_dest":   dist_to_dest,
+            "alt_to_lose":    alt_to_lose,
+            "time_to_tod":    time_to_tod_min,
+            "target_alt":     target_alt_ft,
+            "past_tod":       dist_to_tod < 0,
+        }
+
+    def _ui_draw_tod(self, tod: dict):
+        alt_to_lose = tod["alt_to_lose"]
+        dist_to_tod = tod["dist_to_tod"]
+        time_to_tod = tod["time_to_tod"]
+
+        if tod["past_tod"]:
+            msg = f"DESCEND NOW — {abs(dist_to_tod):.0f} nm past TOD  (lose {alt_to_lose:.0f} ft)"
+            imgui.text_colored(msg, *_COL_RED)
+        elif dist_to_tod < 1.0:
+            msg = f"TOD imminent — start descent  (lose {alt_to_lose:.0f} ft)"
+            imgui.text_colored(msg, *_COL_YELLOW)
+        else:
+            if time_to_tod is not None:
+                msg = f"TOD in {dist_to_tod:.0f} nm ({time_to_tod:.0f} min)  —  lose {alt_to_lose:.0f} ft"
+            else:
+                msg = f"TOD in {dist_to_tod:.0f} nm  —  lose {alt_to_lose:.0f} ft"
+            imgui.text_colored(msg, *_COL_CYAN)
+        imgui.text_colored(
+            f"  3\xb0 descent to {tod['target_alt']:.0f} ft MSL (field + 1500)",
+            *_COL_DIM,
+        )
+
     # ── LOAD tab ───────────────────────────────────────────────────────────────
+
+    # ── Clipboard ────────────────────────────────────────────────────────────
+
+    def _read_clipboard(self) -> str:
+        """Return the OS clipboard as a string, or '' on any failure.
+
+        Workaround for xp_imgui: Ctrl/Cmd+V paste doesn't reliably reach the
+        input_text widget, so we shell out to the platform clipboard tool.
+        """
+        import subprocess
+        import sys
+        try:
+            if sys.platform == "darwin":
+                out = subprocess.check_output(["pbpaste"], timeout=1)
+            elif sys.platform == "win32":
+                out = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
+                    timeout=1,
+                )
+            else:
+                out = subprocess.check_output(
+                    ["xclip", "-selection", "clipboard", "-o"], timeout=1,
+                )
+            return out.decode("utf-8", errors="replace")
+        except Exception as exc:
+            self._log("clipboard read failed:", exc)
+            return ""
+
+    # ── Route entry (typed custom route) ─────────────────────────────────────
+
+    _ROUTE_ENTRY_BUF = 256
+
+    _TOKEN_COLOURS = {
+        "ok":        _COL_GREEN,
+        "skipped":   _COL_DIM,
+        "too_far":   _COL_ORANGE,
+        "not_found": _COL_RED,
+    }
+
+    def _ui_draw_route_entry(self):
+        # Poll for a completed background fetch and apply it on the main thread.
+        result = self._simbrief_result
+        if result is not None:
+            self._simbrief_result = None
+            route_str, error = result
+            if route_str:
+                self.route_entry_text = route_str
+                self._cmd_route_entry_parse()
+            else:
+                self._simbrief_error = error or "Unknown error"
+
+        if self.simbrief_id:
+            if self._simbrief_fetching:
+                imgui.text_colored("Simbrief: fetching...", *_COL_DIM)
+            else:
+                if imgui.button("FETCH FROM SIMBRIEF"):
+                    self._simbrief_error = ""
+                    self._cmd_simbrief_fetch()
+            err = getattr(self, "_simbrief_error", "")
+            if err:
+                imgui.text_colored(f"  {err}", *_COL_RED)
+            imgui.separator()
+
+        imgui.text_colored("Route:", *_COL_YELLOW)
+        imgui.same_line()
+        try:
+            changed, new_text = imgui.input_text(
+                "##route_entry", self.route_entry_text, self._ROUTE_ENTRY_BUF,
+            )
+        except Exception:
+            # Older xp_imgui builds used a 2-arg signature.
+            changed, new_text = imgui.input_text("##route_entry", self.route_entry_text)
+        if changed:
+            self.route_entry_text = new_text
+
+        imgui.same_line()
+        if imgui.button("PASTE##route_entry"):
+            pasted = self._read_clipboard()
+            if pasted:
+                self.route_entry_text = pasted.strip()
+        imgui.same_line()
+        if imgui.button("PARSE##route_entry"):
+            self._cmd_route_entry_parse()
+        imgui.same_line()
+        if imgui.button("CLEAR##route_entry"):
+            self.route_entry_text = ""
+            self.route_entry_parsed = []
+            self.route_entry_status = ""
+
+        tokens = self.route_entry_parsed
+        if tokens:
+            for t in tokens:
+                col = self._TOKEN_COLOURS.get(t.status, _COL_WHITE)
+                marker = {"ok": "+", "skipped": ".",
+                          "too_far": "!", "not_found": "x"}.get(t.status, "?")
+                line = f"  {marker} {t.raw:<10} {t.category}"
+                if t.message:
+                    line += f"  - {t.message}"
+                imgui.text_colored(line, *col)
+
+            imgui.text_colored(f"  {self.route_entry_status}", *_COL_DIM)
+
+            ok_entries = any(t.entry is not None for t in tokens)
+            if ok_entries and imgui.button("LOAD ROUTE INTO FMS##route_entry"):
+                self._cmd_route_entry_load()
 
     def _ui_draw_load(self):
         sv = self.string_values
+
+        # ── Route entry (typed custom route) ──
+        self._ui_draw_route_entry()
+        imgui.separator()
+
         loaded_fn = sv.get("loaded_filename", "")
 
         if loaded_fn:
@@ -571,8 +795,217 @@ class UIMixin:
         if imgui.button("Direct-To Dest"):
             self._cmd_legs_direct_to_destination()
         imgui.same_line()
+        if imgui.button("Sync from FMS"):
+            self._cmd_sync_from_fms()
+        imgui.same_line()
         if imgui.button("Clear All"):
             self._cmd_legs_clear_all()
+
+    # ── ADVISE tab ────────────────────────────────────────────────────────────
+
+    def _ui_recommended_proc(self, kind: str):
+        route = self._route_idents() if hasattr(self, "_route_idents") else set()
+        airport = self._proc_airport_for(kind) if hasattr(self, "_proc_airport_for") else ""
+
+        if airport and not self._proc_procs.get(kind) and hasattr(self, "_proc_refresh"):
+            self._proc_refresh()
+
+        if kind == "dep":
+            recs = getattr(self, "dep_recommended_sids", [])
+            if recs:
+                display_name = recs[0][0]
+                return next((p for p in self._proc_procs.get(kind, []) if p.display_name == display_name), None)
+            loaded = self._proc_loaded.get(kind, "")
+            if loaded:
+                return next((p for p in self._proc_procs.get(kind, []) if p.display_name == loaded), None)
+            return None
+        if kind == "arr":
+            recs = getattr(self, "arr_recommended_stars", [])
+            if recs:
+                display_name = recs[0]
+                return next((p for p in self._proc_procs.get(kind, []) if p.display_name == display_name), None)
+            best_rwy = self._best_arrival_runway() if hasattr(self, "_best_arrival_runway") else ""
+            best_num = self._rwy_num(best_rwy) if best_rwy and hasattr(self, "_rwy_num") else ""
+            candidates = []
+            seen = set()
+            for proc in self._proc_procs.get(kind, []):
+                if proc.name in seen:
+                    continue
+                seen.add(proc.name)
+                if best_num and f"RW{best_num}" not in proc.display_name.upper():
+                    continue
+                connected = int(
+                    (proc.transition and proc.transition in route)
+                    or (proc.waypoints and proc.waypoints[0] in route)
+                )
+                candidates.append((connected, proc))
+            if candidates:
+                candidates.sort(key=lambda item: item[0], reverse=True)
+                return candidates[0][1]
+            loaded = self._proc_loaded.get(kind, "")
+            if loaded:
+                return next((p for p in self._proc_procs.get(kind, []) if p.display_name == loaded), None)
+            return None
+        recs = getattr(self, "arr_recommended_apps", [])
+        if recs:
+            display_name = recs[0][0]
+            return next((p for p in self._proc_procs.get(kind, []) if p.display_name == display_name), None)
+        best_rwy = self._best_arrival_runway() if hasattr(self, "_best_arrival_runway") else ""
+        best_num = self._rwy_num(best_rwy) if best_rwy and hasattr(self, "_rwy_num") else ""
+        candidates = []
+        for proc in self._proc_procs.get(kind, []):
+            proc_rwy = (proc.display_runway or "").strip().upper()
+            if best_rwy and proc_rwy != best_rwy and not (best_num and self._rwy_num(proc.display_runway or "") == best_num):
+                continue
+            connected = int(
+                (proc.transition and proc.transition in route)
+                or (proc.waypoints and proc.waypoints[0] in route)
+            )
+            candidates.append((connected, proc))
+        if candidates:
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            return candidates[0][1]
+        loaded = self._proc_loaded.get(kind, "")
+        if loaded:
+            return next((p for p in self._proc_procs.get(kind, []) if p.display_name == loaded), None)
+        return None
+
+    def _ui_recommendation_reason(self, kind: str, proc) -> str:
+        if not proc:
+            airport = self._proc_airport_for(kind) or "airport"
+            label = {"dep": "SIDs", "arr": "STARs", "app": "approaches"}.get(kind, "procedures")
+            # Distinguish "no procs published for this airport" from
+            # "procs exist but cache is empty".
+            if not self._proc_procs.get(kind):
+                return f"{airport} has no {label} cached. Refresh procedures."
+            return f"No {label} published for {airport}."
+
+        route = self._route_idents() if hasattr(self, "_route_idents") else set()
+        plan = self._selected_plan() if hasattr(self, "_selected_plan") else None
+
+        if kind == "dep":
+            if getattr(self, "dep_runway_ranking", []):
+                best = self.dep_runway_ranking[0][0]
+                reason = f"Runway {best} is the best departure runway from current wind."
+            else:
+                dep_rwy = getattr(plan, "dep_runway", "") if plan else ""
+                reason = f"Using filed departure runway {dep_rwy}." if dep_rwy else "No wind ranking; showing best route-connected SID."
+            if proc.waypoints and proc.waypoints[-1] in route:
+                reason += f" Route joins at {proc.waypoints[-1]}."
+            return reason
+
+        if kind == "arr":
+            if getattr(self, "wind_runway_ranking", []):
+                best = self.wind_runway_ranking[0][0]
+                reason = f"Runway {best} is the best arrival runway from current wind."
+            else:
+                dest_rwy = getattr(plan, "dest_runway", "") if plan else ""
+                reason = f"Using filed destination runway {dest_rwy}." if dest_rwy else "No wind ranking; using best route-connected STAR."
+            join_fix = proc.transition if proc.transition in route else (proc.waypoints[0] if proc.waypoints and proc.waypoints[0] in route else "")
+            if join_fix:
+                reason += f" Route joins at {join_fix}."
+            return reason
+
+        if getattr(self, "wind_runway_ranking", []):
+            best = self.wind_runway_ranking[0][0]
+            reason = f"Approach runway {best} is favored by wind."
+        else:
+            dest_rwy = getattr(plan, "dest_runway", "") if plan else ""
+            reason = f"Using filed destination runway {dest_rwy}." if dest_rwy else "No wind ranking; using best matching approach."
+        if proc.transition and proc.transition in route:
+            reason += f" Entry transition {proc.transition} matches the route."
+        elif proc.transition:
+            reason += f" Entry transition {proc.transition} is available."
+        return reason
+
+    def _ui_draw_advice_section(self, kind: str, title: str, airport: str):
+        proc = self._ui_recommended_proc(kind)
+        loaded = self._proc_loaded.get(kind, "")
+        label = "SID" if kind == "dep" else ("STAR" if kind == "arr" else "APP")
+
+        imgui.text_colored(title, *_COL_YELLOW)
+        imgui.same_line()
+        imgui.text_colored(f"  {airport or '----'}", *(_COL_CYAN if airport else _COL_GREY))
+        if proc and loaded == proc.display_name:
+            imgui.same_line()
+            imgui.text_colored("  \u2713 loaded", *_COL_GREEN)
+        elif loaded:
+            imgui.same_line()
+            imgui.text_colored(f"  loaded: {loaded}", *_COL_DIM)
+
+        if not proc:
+            imgui.text_colored(self._ui_recommendation_reason(kind, proc), *_COL_GREY)
+            return
+
+        imgui.columns(2, f"adv_{kind}_head", border=False)
+        imgui.text_colored(label, *_COL_DIM)
+        imgui.next_column()
+        imgui.text_colored(proc.display_name, *_COL_GREEN)
+        imgui.columns(1)
+
+        imgui.columns(2, f"adv_{kind}_meta", border=False)
+        imgui.text_colored("Transition", *_COL_DIM)
+        imgui.next_column()
+        imgui.text_colored(proc.transition or "--", *_COL_WHITE)
+        imgui.columns(1)
+
+        imgui.columns(2, f"adv_{kind}_rwy", border=False)
+        imgui.text_colored("Runway", *_COL_DIM)
+        imgui.next_column()
+        imgui.text_colored(proc.display_runway or "--", *_COL_ORANGE)
+        imgui.columns(1)
+
+        fixes_preview = " ".join(proc.waypoints[:6]) if proc.waypoints else "--"
+        if len(proc.waypoints) > 6:
+            fixes_preview += f" +{len(proc.waypoints) - 6}"
+        imgui.columns(2, f"adv_{kind}_fixes", border=False)
+        imgui.text_colored("Fixes", *_COL_DIM)
+        imgui.next_column()
+        imgui.text_colored(fixes_preview, *_COL_WHITE)
+        imgui.columns(1)
+
+        imgui.text_colored(self._ui_recommendation_reason(kind, proc), *_COL_DIM)
+
+    def _ui_draw_advise(self):
+        plan = self._selected_plan() if hasattr(self, "_selected_plan") else None
+        dep_icao = getattr(self, "proc_dep_icao", "") or getattr(plan, "dep", "")
+        dest_icao = getattr(self, "proc_dest_icao", "") or getattr(plan, "dest", "")
+
+        avionics = getattr(self, "avionics_name", "FMS")
+        imgui.text_colored("Advisory Only", *_COL_YELLOW)
+        imgui.same_line()
+        imgui.text_colored(
+            f"  Recommended terminal setup for native {avionics} PROC loading.",
+            *_COL_DIM,
+        )
+        if imgui.button("Refresh Advice##advise_refresh"):
+            if hasattr(self, "_proc_airports_from_fms"):
+                self._proc_airports_from_fms()
+            if hasattr(self, "_proc_refresh"):
+                self._proc_refresh()
+            self._cmd_wind_refresh()
+        imgui.same_line()
+        if imgui.button(f"Open {avionics} FPL##advise_fpl"):
+            self._cmd_open_fpl()
+
+        imgui.text_colored(
+            f"Preferred workflow: review advice here, then load procedures in native {avionics} PROC. Direct FMS injection remains an internal fallback and may display differently.",
+            *_COL_DIM,
+        )
+        imgui.separator()
+
+        self._ui_draw_advice_section("dep", "Departure", dep_icao)
+        imgui.separator()
+        self._ui_draw_advice_section("arr", "Arrival", dest_icao)
+        imgui.separator()
+        self._ui_draw_advice_section("app", "Approach", dest_icao)
+
+        imgui.separator()
+        issues = getattr(self, "validation_issues", [])
+        if issues:
+            imgui.text_colored("Current route still has validation findings on CHECK.", *_COL_ORANGE)
+        else:
+            imgui.text_colored("Current route passes CHECK.", *_COL_GREEN)
 
     # ── DEP / ARR / APP — procedure name list ─────────────────────────────────
 
@@ -583,6 +1016,8 @@ class UIMixin:
         names    = self._proc_names.get(kind, [])
         loaded   = self._proc_loaded.get(kind, "")
         sel_name = self._proc_selected_proc_name(kind)
+        transitions = self._proc_transitions(kind)
+        idx = self._proc_index.get(kind, -1)
 
         # Build set of recommended proc names for green highlighting
         if kind == "dep":
@@ -610,7 +1045,16 @@ class UIMixin:
         imgui.same_line()
         if imgui.button(f"Refresh##{kind}"):
             self._cmd_proc_refresh(kind)
+        imgui.same_line()
+        if imgui.button(f"Advice##{kind}_advice"):
+            self._ui_tab = _TAB_ADVISE
 
+        imgui.separator()
+        avionics = getattr(self, "avionics_name", "FMS")
+        imgui.text_colored(
+            f"Advisory/native {avionics} loading is preferred for display fidelity. Direct injection below is a fallback.",
+            *_COL_DIM,
+        )
         imgui.separator()
 
         if not names:
@@ -620,21 +1064,31 @@ class UIMixin:
 
         n = len(names)
         page_size = self.PROC_VISIBLE_ROWS
-        window_start = self._proc_name_window.get(kind, 0)
-        page = window_start // page_size + 1
-        total_pages = max(1, (n + page_size - 1) // page_size)
+        name_window_start = self._proc_name_window.get(kind, 0)
+        name_page = name_window_start // page_size + 1
+        name_total_pages = max(1, (n + page_size - 1) // page_size)
+        nt = len(transitions)
+        trans_window_start = self._proc_window.get(kind, 0)
+        trans_page = trans_window_start // page_size + 1 if nt else 1
+        trans_total_pages = max(1, (nt + page_size - 1) // page_size) if nt else 1
 
+        imgui.columns(2, f"{kind}_split", border=False)
+
+        imgui.text_colored(f"{label} Names", *_COL_YELLOW)
+        imgui.same_line()
+        imgui.text_colored(f"  {name_page}/{name_total_pages}", *_COL_DIM)
+        imgui.separator()
         imgui.columns(3, f"{kind}_hdr", border=False)
         imgui.text_colored("#", *_COL_YELLOW)
         imgui.next_column()
         imgui.text_colored(label, *_COL_YELLOW)
         imgui.next_column()
-        imgui.text_colored(f"{page}/{total_pages}", *_COL_DIM)
+        imgui.text_colored("TR", *_COL_YELLOW)
         imgui.columns(1)
         imgui.separator()
 
         for row in range(page_size):
-            pi = window_start + row
+            pi = name_window_start + row
             if pi >= n:
                 imgui.text_colored("-", *_COL_DIM)
                 continue
@@ -653,7 +1107,7 @@ class UIMixin:
                 self._cmd_proc_select_row(kind, pi)
             imgui.pop_style_color()
             imgui.next_column()
-            imgui.text_colored(f"{trans_count}" if trans_count > 1 else "", *_COL_DIM)
+            imgui.text_colored(str(trans_count), *_COL_DIM)
             imgui.columns(1)
 
         imgui.separator()
@@ -663,96 +1117,149 @@ class UIMixin:
         if imgui.button(f"Next >##{kind}_next"):
             self._cmd_proc_scroll_down(kind)
 
-    # ── DEP TR / ARR TR / APP TR — transition list ────────────────────────────
+        imgui.next_column()
 
-    def _ui_draw_proc_trans(self, kind: str):
-        label_map = {"dep": "SID", "arr": "STAR", "app": "APP"}
-        label     = label_map[kind]
-        sel_name  = self._proc_selected_proc_name(kind)
-        loaded    = self._proc_loaded.get(kind, "")
-        transitions = self._proc_transitions(kind)
-        idx       = self._proc_index.get(kind, -1)
-
-        imgui.text_colored(label, *_COL_YELLOW)
+        imgui.text_colored("Transitions", *_COL_YELLOW)
         if sel_name:
             imgui.same_line()
-            imgui.text_colored(f" > {sel_name}", *_COL_YELLOW)
-        if loaded:
-            imgui.same_line()
-            imgui.text_colored(f"  \u2713 {loaded}", *_COL_GREEN)
+            imgui.text_colored(f"  {sel_name}", *_COL_YELLOW)
         imgui.same_line()
-        if imgui.button(f"Back##{kind}_back"):
-            self._cmd_proc_back(kind)
-
+        imgui.text_colored(f"  {trans_page}/{trans_total_pages}", *_COL_DIM)
         imgui.separator()
 
         if not sel_name:
-            imgui.text_colored(f"No {label} selected - go to {label} page first", *_COL_GREY)
-            return
-
-        if not transitions:
+            imgui.text_colored(f"Select a {label} on the left.", *_COL_GREY)
+        elif not transitions:
             imgui.text_colored(f"No transitions for {sel_name}", *_COL_GREY)
-            return
-
-        nt = len(transitions)
-        page_size = self.PROC_VISIBLE_ROWS
-        window_start = self._proc_window.get(kind, 0)
-        page = window_start // page_size + 1
-        total_pages = max(1, (nt + page_size - 1) // page_size)
-
-        imgui.columns(4, f"{kind}tr_hdr", border=False)
-        imgui.text_colored("#", *_COL_YELLOW)
-        imgui.next_column()
-        imgui.text_colored(label, *_COL_YELLOW)
-        imgui.next_column()
-        imgui.text_colored("RWY", *_COL_YELLOW)
-        imgui.next_column()
-        imgui.text_colored(f"{page}/{total_pages}", *_COL_DIM)
-        imgui.columns(1)
-        imgui.separator()
-
-        for row in range(page_size):
-            pi = window_start + row
-            if pi >= nt:
-                imgui.text_colored("-", *_COL_DIM)
-                continue
-            proc   = transitions[pi]
-            is_sel = pi == idx
-            col    = _COL_YELLOW if is_sel else _COL_WHITE
-
-            imgui.columns(4, f"{kind}tr_r{row}", border=False)
-            imgui.text_colored(str(pi + 1), *_COL_DIM)
+        else:
+            imgui.columns(3, f"{kind}tr_hdr", border=False)
+            imgui.text_colored("#", *_COL_YELLOW)
             imgui.next_column()
-            imgui.push_style_color(imgui.COLOR_TEXT, *col)
-            if imgui.button(f"{'>' if is_sel else ' '} {proc.display_name}##{kind}tr_{row}"):
-                self._cmd_proc_select_trans_row(kind, pi)
-            imgui.pop_style_color()
+            imgui.text_colored("Transition", *_COL_YELLOW)
             imgui.next_column()
-            imgui.text_colored(proc.display_runway or "", *_COL_ORANGE)
-            imgui.next_column()
+            imgui.text_colored("RWY", *_COL_YELLOW)
             imgui.columns(1)
+            imgui.separator()
+
+            for row in range(page_size):
+                pi = trans_window_start + row
+                if pi >= nt:
+                    imgui.text_colored("-", *_COL_DIM)
+                    continue
+                proc   = transitions[pi]
+                is_sel = pi == idx
+                col    = _COL_YELLOW if is_sel else _COL_WHITE
+
+                imgui.columns(3, f"{kind}tr_r{row}", border=False)
+                imgui.text_colored(str(pi + 1), *_COL_DIM)
+                imgui.next_column()
+                imgui.push_style_color(imgui.COLOR_TEXT, *col)
+                if imgui.button(f"{'>' if is_sel else ' '} {proc.display_name}##{kind}tr_{row}"):
+                    self._cmd_proc_select_trans_row(kind, pi)
+                imgui.pop_style_color()
+                imgui.next_column()
+                imgui.text_colored(proc.display_runway or "", *_COL_ORANGE)
+                imgui.columns(1)
+
+            imgui.separator()
+            if imgui.button(f"< Prev##{kind}tr_prev"):
+                self._cmd_proc_trans_scroll_up(kind)
+            imgui.same_line()
+            if imgui.button(f"Next >##{kind}tr_next"):
+                self._cmd_proc_trans_scroll_down(kind)
+
+            if idx >= 0:
+                proc = transitions[idx]
+                imgui.separator()
+                imgui.text_colored(f"Selected: {proc.display_name}", *_COL_YELLOW)
+                fixes_preview = " ".join(proc.waypoints[:8])
+                if len(proc.waypoints) > 8:
+                    fixes_preview += f" +{len(proc.waypoints) - 8}"
+                imgui.text_colored(f"  {len(proc.waypoints)} fixes: {fixes_preview}", *_COL_DIM)
+                imgui.separator()
+
+                _is_ils = kind == "app" and bool(proc.name) and proc.name[0] in "ILXB"
+                if _is_ils:
+                    self._ui_draw_ils_advisory(proc, kind, label)
+                else:
+                    if imgui.button(f"Insert {label} into FMS##{kind}_ins"):
+                        self._cmd_proc_activate(kind)
+                    imgui.same_line()
+                    if imgui.button(f"Show In ADVISE##{kind}_adv"):
+                        self._ui_tab = _TAB_ADVISE
+                    imgui.same_line()
+                    if imgui.button(f"Clear##{kind}_clr"):
+                        self._cmd_proc_clear_selected(kind)
+                    imgui.same_line()
+                    if imgui.button(f"Back##{kind}_back"):
+                        self._cmd_proc_back(kind)
+
+        imgui.columns(1)
+
+    def _ui_draw_ils_advisory(self, proc, kind: str, label: str) -> None:
+        """Render the ILS/LOC approach setup advisory with per-step action buttons."""
+        apt_icao   = getattr(self, "proc_dest_icao", "")
+        freq_khz, course_deg = self._lookup_ils_info(proc, apt_icao)
+        nav1_freq  = self._ils_read_nav1_freq()
+        nav1_crs   = self._ils_read_nav1_course()
+
+        imgui.text_colored("── APPROACH SETUP ──", *_COL_CYAN)
+
+        # Step 1 — NAV1 frequency
+        imgui.text_colored("1.", *_COL_DIM)
+        imgui.same_line()
+        if freq_khz is not None:
+            freq_mhz  = freq_khz / 100.0
+            tuned     = nav1_freq is not None and nav1_freq == freq_khz
+            col       = _COL_GREEN if tuned else _COL_WHITE
+            suffix    = "  ✓" if tuned else ""
+            imgui.text_colored(f"NAV1  {freq_mhz:.2f} MHz{suffix}", *col)
+            if not tuned:
+                imgui.same_line()
+                if imgui.button("Tune NAV1##app_ils_freq"):
+                    self._cmd_tune_nav1(freq_khz)
+        else:
+            imgui.text_colored("NAV1  frequency unavailable", *_COL_DIM)
+
+        # Step 2 — inbound course
+        imgui.text_colored("2.", *_COL_DIM)
+        imgui.same_line()
+        if course_deg is not None:
+            set_ok = (
+                nav1_crs is not None
+                and abs(((nav1_crs - course_deg) + 180) % 360 - 180) < 2.0
+            )
+            col    = _COL_GREEN if set_ok else _COL_WHITE
+            suffix = "  ✓" if set_ok else ""
+            imgui.text_colored(f"CRS   {course_deg:.0f}°{suffix}", *col)
+            if not set_ok:
+                imgui.same_line()
+                if imgui.button("Set CRS##app_ils_crs"):
+                    self._cmd_set_nav1_course(course_deg)
+        else:
+            imgui.text_colored("CRS   course unavailable", *_COL_DIM)
+
+        # Step 3 — insert into FMS
+        imgui.text_colored("3.", *_COL_DIM)
+        imgui.same_line()
+        loaded = getattr(self, "_proc_loaded", {}).get(kind, "")
+        inserted = bool(loaded and loaded == proc.display_name)
+        col    = _COL_GREEN if inserted else _COL_ORANGE
+        suffix = "  ✓" if inserted else ""
+        if imgui.button(f"Insert {label} into FMS##{kind}_ins"):
+            self._cmd_proc_activate(kind)
+        imgui.same_line()
+        imgui.text_colored(suffix, *col)
 
         imgui.separator()
-        if imgui.button(f"< Prev##{kind}tr_prev"):
-            self._cmd_proc_trans_scroll_up(kind)
+        if imgui.button(f"Show In ADVISE##{kind}_adv"):
+            self._ui_tab = _TAB_ADVISE
         imgui.same_line()
-        if imgui.button(f"Next >##{kind}tr_next"):
-            self._cmd_proc_trans_scroll_down(kind)
-
-        if idx >= 0:
-            proc = transitions[idx]
-            imgui.separator()
-            imgui.text_colored(f"Selected: {proc.display_name}", *_COL_YELLOW)
-            fixes_preview = " ".join(proc.waypoints[:8])
-            if len(proc.waypoints) > 8:
-                fixes_preview += f" +{len(proc.waypoints) - 8}"
-            imgui.text_colored(f"  {len(proc.waypoints)} fixes: {fixes_preview}", *_COL_DIM)
-            imgui.separator()
-            if imgui.button(f"Insert {label} into FMS##{kind}_ins"):
-                self._cmd_proc_activate(kind)
-            imgui.same_line()
-            if imgui.button(f"Clear##{kind}_clr"):
-                self._cmd_proc_clear_selected(kind)
+        if imgui.button(f"Clear##{kind}_clr"):
+            self._cmd_proc_clear_selected(kind)
+        imgui.same_line()
+        if imgui.button(f"Back##{kind}_back"):
+            self._cmd_proc_back(kind)
 
     # ── CHECK tab ─────────────────────────────────────────────────────────────
 
@@ -1023,5 +1530,22 @@ class UIMixin:
                 imgui.text_colored(f"{crosswind:.1f} kt", *_COL_ORANGE); imgui.next_column()
                 imgui.text_colored(marker,                *hw_col)
                 imgui.columns(1)
+
+    # ── PREFS tab ─────────────────────────────────────────────────────────────
+
+    _SIMBRIEF_ID_BUF = 64
+
+    def _ui_draw_prefs(self):
+        imgui.text_colored("Simbrief pilot ID", *_COL_YELLOW)
+        try:
+            changed, new_id = imgui.input_text(
+                "##simbrief_id", self.simbrief_id, self._SIMBRIEF_ID_BUF,
+            )
+        except Exception:
+            changed, new_id = imgui.input_text("##simbrief_id", self.simbrief_id)
+        if changed:
+            self.simbrief_id = new_id.strip()
+            self._simbrief_error = ""
+        imgui.text_colored("Numeric ID or username from simbrief.com", *_COL_DIM)
 
         # Recommendations are shown in the DEP / ARR / APP tabs with Apply buttons.

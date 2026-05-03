@@ -11,12 +11,23 @@ from typing import Dict, List, Optional
 
 from XPPython3 import xp
 
-from fmscompanion.models import ProcedureInfo
+from fmscompanion.models import FlightPlanEntry, ProcedureInfo
 
 # Maximum distance (nm) a resolved navaid may be from the airport centre before
 # we consider it a name conflict and reject it.  Procedures rarely span more than
 # 200 nm; 500 nm is a generous safety margin that still excludes global conflicts.
 _MAX_PROC_FIX_DIST_NM = 500.0
+
+# Approach types that use an ILS/LOC-family frequency and inbound course
+_ILS_APP_CHARS = frozenset("ILXB")  # ILS, LOC, LDA, LOC BC
+
+# Datarefs for NAV1 radio state (read + write)
+_NAV1_FREQ_DREF   = "sim/cockpit/radios/nav1_freq_hz"
+_NAV1_COURSE_DREF = "sim/cockpit/radios/nav1_obs_deg_mag_pilot"
+
+# Estimated localizer distance beyond the stop-end of the runway (nm).
+# Used to offset the navaid search point toward where the localizer antenna sits.
+_LOC_OFFSET_NM = 2.0
 
 
 def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -31,6 +42,114 @@ def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 class ProceduresMixin:
     """Mixin providing SID/STAR/APP procedure browsing and FMS insertion."""
+
+    @staticmethod
+    def _entry_ident(entry: FlightPlanEntry) -> str:
+        return (getattr(entry, "ident", "") or "").strip().upper()
+
+    def _merge_sid_with_plan(
+        self,
+        proc_nav: List[tuple],
+        original: List[FlightPlanEntry],
+    ) -> List[tuple]:
+        """Keep the departure airport first, then SID legs, then the remaining route.
+
+        The original plan already contains the airport and the filed route beyond the
+        SID exit. When applying a new SID, resume the original route after the first
+        SID/route join point instead of appending the whole plan and duplicating fixes.
+        """
+        if not original:
+            return proc_nav
+
+        merged: List[tuple] = []
+        dep_entry = original[0]
+        dep_ident = self._entry_ident(dep_entry)
+        sid_idents = [
+            (ident or "").strip().upper()
+            for _, ident in proc_nav
+            if (ident or "").strip()
+        ]
+
+        merged.append(("entry", dep_entry))
+        seen = {dep_ident} if dep_ident else set()
+
+        for ref, ident in proc_nav:
+            ident_key = (ident or "").strip().upper()
+            if ident_key and ident_key in seen:
+                continue
+            if ref == xp.NAV_NOT_FOUND:
+                continue
+            merged.append(("proc", ref, ident))
+            if ident_key:
+                seen.add(ident_key)
+
+        resume_at = 1
+        if sid_idents:
+            sid_set = set(sid_idents)
+            for i, entry in enumerate(original[1:], start=1):
+                if self._entry_ident(entry) in sid_set:
+                    resume_at = i + 1
+
+        for entry in original[resume_at:]:
+            ident_key = self._entry_ident(entry)
+            if ident_key and ident_key in seen:
+                continue
+            merged.append(("entry", entry))
+            if ident_key:
+                seen.add(ident_key)
+
+        return merged
+
+    def _merge_arrival_with_route(
+        self,
+        proc_nav: List[tuple],
+        original: List[FlightPlanEntry],
+    ) -> List[tuple]:
+        """Splice STAR/APP into the live route before the destination airport."""
+        if not original:
+            return [("proc", ref, ident) for ref, ident in proc_nav if ref != xp.NAV_NOT_FOUND]
+
+        proc_idents = [
+            (ident or "").strip().upper()
+            for _, ident in proc_nav
+            if (ident or "").strip()
+        ]
+        dest_entry = original[-1] if original and getattr(original[-1], "entry_type", None) == 1 else None
+        route_body = original[:-1] if dest_entry else list(original)
+
+        splice_at = len(route_body)
+        if proc_idents:
+            proc_set = set(proc_idents)
+            for i, entry in enumerate(route_body):
+                if self._entry_ident(entry) in proc_set:
+                    splice_at = i
+                    break
+
+        merged: List[tuple] = []
+        seen = set()
+
+        for entry in route_body[:splice_at]:
+            ident_key = self._entry_ident(entry)
+            merged.append(("entry", entry))
+            if ident_key:
+                seen.add(ident_key)
+
+        for ref, ident in proc_nav:
+            ident_key = (ident or "").strip().upper()
+            if ref == xp.NAV_NOT_FOUND:
+                continue
+            if ident_key and ident_key in seen:
+                continue
+            merged.append(("proc", ref, ident))
+            if ident_key:
+                seen.add(ident_key)
+
+        if dest_entry:
+            dest_ident = self._entry_ident(dest_entry)
+            if not dest_ident or dest_ident not in seen:
+                merged.append(("entry", dest_entry))
+
+        return merged
 
     # ── CIFP file access ──
 
@@ -387,6 +506,9 @@ class ProceduresMixin:
                     info = xp.getFMSEntryInfo(i)
                     if getattr(info, "type", None) == xp.Nav_Airport:
                         icao = (getattr(info, "navAidID", "") or "").strip().upper()
+                        # X-Plane internally prefixes some airports with "X" (e.g. EDDB → XEDDB)
+                        if len(icao) == 5 and icao.startswith("X"):
+                            icao = icao[1:]
                         if len(icao) == 4:
                             dep_icao = icao
                             break
@@ -395,6 +517,9 @@ class ProceduresMixin:
                     info = xp.getFMSEntryInfo(i)
                     if getattr(info, "type", None) == xp.Nav_Airport:
                         icao = (getattr(info, "navAidID", "") or "").strip().upper()
+                        # X-Plane internally prefixes some airports with "X" (e.g. EDDB → XEDDB)
+                        if len(icao) == 5 and icao.startswith("X"):
+                            icao = icao[1:]
                         if len(icao) == 4:
                             dest_icao = icao
                             break
@@ -565,6 +690,135 @@ class ProceduresMixin:
             self._proc_airports_from_fms()
         else:
             self._proc_refresh()
+        if hasattr(self, "_wind_refresh_dep"):
+            self._wind_refresh_dep()
+        if hasattr(self, "_wind_refresh_arr"):
+            self._wind_refresh_arr()
+        if hasattr(self, "_save_state"):
+            self._save_state()
+
+    # ── ILS / LOC lookup and radio tuning ────────────────────────────────────
+
+    def _lookup_ils_info(self, proc, apt_icao: str):
+        """Return (freq_khz, course_deg) for an ILS/LOC-type approach, or (None, None).
+
+        freq_khz is in X-Plane units (10 Hz steps, e.g. 10900 = 109.00 MHz).
+        Result is cached so repeated UI redraws don't hammer the navaid API.
+        """
+        if not proc or proc.proc_type != "APP":
+            return None, None
+        if not proc.name or proc.name[0] not in _ILS_APP_CHARS:
+            return None, None
+
+        cache = getattr(self, "_ils_info_cache", None)
+        if cache is None:
+            self._ils_info_cache: Dict[tuple, tuple] = {}
+            cache = self._ils_info_cache
+        key = (proc.name, apt_icao)
+        if key in cache:
+            return cache[key]
+
+        result = self._do_ils_lookup(proc, apt_icao)
+        cache[key] = result
+        self._log(f"ILS lookup {proc.display_name} @ {apt_icao}: freq={result[0]} crs={result[1]}")
+        return result
+
+    def _do_ils_lookup(self, proc, apt_icao: str):
+        # Resolve airport position for proximity filtering
+        apt_lat, apt_lon = None, None
+        apt_ref = xp.findNavAid(None, apt_icao, None, None, None, xp.Nav_Airport)
+        if apt_ref != xp.NAV_NOT_FOUND:
+            try:
+                apt_info = xp.getNavAidInfo(apt_ref)
+                apt_lat = float(apt_info.latitude)
+                apt_lon = float(apt_info.longitude)
+            except Exception:
+                pass
+        if apt_lat is None:
+            return None, None
+
+        # Expected magnetic heading from runway designator, e.g. "06L" → 60.0°
+        expected_hdg: Optional[float] = None
+        try:
+            expected_hdg = float(proc.display_runway.rstrip("LRC")) * 10.0
+        except (ValueError, AttributeError):
+            pass
+
+        # Localizer antenna sits beyond the stop-end of the runway; offset the
+        # search point in the reciprocal direction so findNavAid returns the right
+        # navaid first at multi-ILS airports.
+        search_lat, search_lon = apt_lat, apt_lon
+        if expected_hdg is not None:
+            recip_rad = math.radians((expected_hdg + 180.0) % 360.0)
+            deg_per_nm = 1.0 / 60.0
+            search_lat = apt_lat + _LOC_OFFSET_NM * deg_per_nm * math.cos(recip_rad)
+            cos_lat = max(math.cos(math.radians(apt_lat)), 1e-6)
+            search_lon = apt_lon + _LOC_OFFSET_NM * deg_per_nm * math.sin(recip_rad) / cos_lat
+
+        for nav_type in (xp.Nav_ILS, xp.Nav_Localizer):
+            for slat, slon in ((search_lat, search_lon), (apt_lat, apt_lon)):
+                ref = xp.findNavAid(None, None, slat, slon, None, nav_type)
+                if ref == xp.NAV_NOT_FOUND:
+                    continue
+                try:
+                    nav_info = xp.getNavAidInfo(ref)
+                    heading  = float(getattr(nav_info, "heading",   0) or 0)
+                    freq     = getattr(nav_info, "frequency", None)
+                    if not freq:
+                        continue
+                    # Reject if heading doesn't match the expected runway (±25°)
+                    if expected_hdg is not None:
+                        diff = abs(((heading - expected_hdg) + 180) % 360 - 180)
+                        if diff > 25.0:
+                            continue
+                    # Reject if the navaid is implausibly far from the airport
+                    nav_lat = float(getattr(nav_info, "latitude",  0))
+                    nav_lon = float(getattr(nav_info, "longitude", 0))
+                    if _haversine_nm(apt_lat, apt_lon, nav_lat, nav_lon) > 15.0:
+                        continue
+                    return int(freq), round(heading, 1)
+                except Exception:
+                    continue
+
+        return None, None
+
+    # ── NAV1 radio read / write ───────────────────────────────────────────────
+
+    def _ils_read_nav1_freq(self) -> Optional[int]:
+        """Read current NAV1 active frequency (10 Hz units). Returns None on failure."""
+        try:
+            ref = xp.findDataRef(_NAV1_FREQ_DREF)
+            return int(xp.getDatai(ref)) if ref else None
+        except Exception:
+            return None
+
+    def _ils_read_nav1_course(self) -> Optional[float]:
+        """Read current NAV1 OBS course (degrees magnetic). Returns None on failure."""
+        try:
+            ref = xp.findDataRef(_NAV1_COURSE_DREF)
+            return float(xp.getDataf(ref)) if ref else None
+        except Exception:
+            return None
+
+    def _cmd_tune_nav1(self, freq_khz: int) -> None:
+        """Write NAV1 active frequency (10 Hz units, e.g. 10900 = 109.00 MHz)."""
+        try:
+            ref = xp.findDataRef(_NAV1_FREQ_DREF)
+            if ref:
+                xp.setDatai(ref, int(freq_khz))
+                self._log(f"Tuned NAV1 → {freq_khz / 100.0:.2f} MHz")
+        except Exception as exc:
+            self._log("tune_nav1 error:", exc)
+
+    def _cmd_set_nav1_course(self, course_deg: float) -> None:
+        """Write NAV1 OBS/course (magnetic degrees)."""
+        try:
+            ref = xp.findDataRef(_NAV1_COURSE_DREF)
+            if ref:
+                xp.setDataf(ref, float(course_deg))
+                self._log(f"Set NAV1 course → {course_deg:.1f}°")
+        except Exception as exc:
+            self._log("set_nav1_course error:", exc)
 
     def _find_proc_navaid(self, ident: str, center_lat, center_lon):
         """Resolve a procedure fix ident to a navaid ref, rejecting results that are
@@ -646,12 +900,15 @@ class ProceduresMixin:
                 # from previous procedure activations.
                 plan = self._selected_plan()
                 original = self._get_cached_entries(plan) if plan else []
+                merged = self._merge_sid_with_plan(proc_nav, original)
                 self._clear_fms()
-                for ref, ident in proc_nav:
-                    if ref != xp.NAV_NOT_FOUND:
+                for item in merged:
+                    if item[0] == "proc":
+                        _, ref, ident = item
                         xp.setFMSEntryInfo(write_idx, ref, 0)
                         write_idx += 1
-                for entry in original:
+                        continue
+                    _, entry = item
                     try:
                         self._load_entry_into_fms(write_idx, entry)
                         write_idx += 1
@@ -660,38 +917,23 @@ class ProceduresMixin:
                 self._proc_splice_point["arr"] = -1
                 self._proc_splice_point["app"] = -1
             else:
-                # STAR or APP: replace previous insertion at splice point, or append
-                splice = self._proc_splice_point.get(kind, -1)
-                count = xp.countFMSEntries()
-                if 0 <= splice <= count:
-                    keep = [xp.getFMSEntryInfo(i) for i in range(splice)]
-                    self._clear_fms()
-                    write_idx = 0
-                    for info in keep:
-                        try:
-                            lat = getattr(info, "lat", getattr(info, "latitude", 0.0))
-                            lon = getattr(info, "lon", getattr(info, "longitude", 0.0))
-                            nav_id = getattr(info, "navAidID", "").strip()
-                            if getattr(info, "type", None) == xp.Nav_LatLon or not nav_id:
-                                xp.setFMSEntryLatLon(write_idx, lat, lon, info.altitude)
-                            else:
-                                ref = xp.findNavAid(None, nav_id, lat, lon, None, xp.Nav_Fix)
-                                if ref == xp.NAV_NOT_FOUND:
-                                    ref = xp.findNavAid(None, nav_id, lat, lon, None, xp.Nav_VOR)
-                                if ref != xp.NAV_NOT_FOUND:
-                                    xp.setFMSEntryInfo(write_idx, ref, info.altitude)
-                                else:
-                                    xp.setFMSEntryLatLon(write_idx, lat, lon, info.altitude)
-                            write_idx += 1
-                        except Exception:
-                            pass
-                else:
-                    write_idx = xp.countFMSEntries()
-                self._proc_splice_point[kind] = write_idx
-                for ref, ident in proc_nav:
-                    if ref != xp.NAV_NOT_FOUND:
+                original = self._live_fms_entries() if hasattr(self, "_live_fms_entries") else []
+                merged = self._merge_arrival_with_route(proc_nav, original)
+                self._clear_fms()
+                write_idx = 0
+                for item in merged:
+                    if item[0] == "proc":
+                        _, ref, ident = item
                         xp.setFMSEntryInfo(write_idx, ref, 0)
                         write_idx += 1
+                        continue
+                    _, entry = item
+                    try:
+                        self._load_entry_into_fms(write_idx, entry)
+                        write_idx += 1
+                    except Exception:
+                        pass
+                self._proc_splice_point[kind] = write_idx
 
             self._legs_init_after_load()
             self._proc_loaded[kind] = proc.display_name

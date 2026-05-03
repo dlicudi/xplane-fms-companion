@@ -645,12 +645,19 @@ class FmsIOMixin:
 
         try:
             # Prefer loading via .fms text buffer as it correctly sets ADEP/ADES
-            # (Origin/Destination) in the FMS header.
+            # (Origin/Destination) in the FMS header. But X-Plane silently drops
+            # airports it doesn't know (e.g. addon airports not in the nav DB),
+            # so verify the entry count and fall back if any were lost.
             fms_text = self._build_route_entry_fms_text(parsed)
-            if fms_text and self._load_fms_plan_text(fms_text, "CUSTOM"):
-                pass
-            elif not self._write_route_entry_into_flight_plan(entries):
-                self._write_entries_into_fms(entries)
+            loaded_ok = False
+            if fms_text:
+                loaded_ok = self._load_fms_plan_text(fms_text, "CUSTOM")
+                if loaded_ok and self._read_fms_entry_count() < len(entries):
+                    self._log("loadFMSFlightPlan dropped entries — falling back to lat/lon method")
+                    loaded_ok = False
+            if not loaded_ok:
+                if not self._write_route_entry_into_flight_plan(entries):
+                    self._write_entries_into_fms(entries)
 
             xp.setDisplayedFMSEntry(0)
             active_idx = 1 if len(entries) > 1 and entries[0].entry_type == 1 else 0

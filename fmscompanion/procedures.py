@@ -25,6 +25,13 @@ _ILS_APP_CHARS = frozenset("ILXB")  # ILS, LOC, LDA, LOC BC
 _NAV1_FREQ_DREF   = "sim/cockpit/radios/nav1_freq_hz"
 _NAV1_COURSE_DREF = "sim/cockpit/radios/nav1_obs_deg_mag_pilot"
 
+# CDI / HSI source: 0 = GPS/FMS, 1 = NAV1, 2 = NAV2
+_HSI_SOURCE_DREF  = "sim/cockpit2/radios/actuators/HSI_source_select_pilot"
+
+# Autopilot approach mode: 0 = off, 1 = armed, 2 = captured
+_AP_APPROACH_DREF = "sim/cockpit2/autopilot/approach_status"
+_AP_APPROACH_CMD  = "sim/autopilot/approach"
+
 # Estimated localizer distance beyond the stop-end of the runway (nm).
 # Used to offset the navaid search point toward where the localizer antenna sits.
 _LOC_OFFSET_NM = 2.0
@@ -603,9 +610,11 @@ class ProceduresMixin:
         self._proc_window[kind] = 0
         self._proc_invalidate_both(kind)
         self._log(f"proc_select_row({kind}, {pi}) -> selected name '{names[pi]}'")
-        # Auto-select if there is exactly one transition
+        # For approaches auto-select the first transition immediately so the
+        # setup panel is visible without a second click. For SID/STAR the user
+        # must choose a transition/runway explicitly.
         transitions = self._proc_transitions(kind)
-        if len(transitions) == 1:
+        if transitions and (kind == "app" or len(transitions) == 1):
             self._proc_index[kind] = 0
             self._proc_invalidate_trans_cache(kind)
 
@@ -819,6 +828,46 @@ class ProceduresMixin:
                 self._log(f"Set NAV1 course → {course_deg:.1f}°")
         except Exception as exc:
             self._log("set_nav1_course error:", exc)
+
+    # ── CDI / HSI source ──────────────────────────────────────────────────────
+
+    def _ap_read_hsi_source(self) -> Optional[int]:
+        """Return current HSI source: 0=GPS, 1=NAV1, 2=NAV2. None on failure."""
+        try:
+            ref = xp.findDataRef(_HSI_SOURCE_DREF)
+            return int(xp.getDatai(ref)) if ref else None
+        except Exception:
+            return None
+
+    def _cmd_set_hsi_source(self, source: int) -> None:
+        """Set HSI source: 0=GPS/FMS, 1=NAV1, 2=NAV2."""
+        try:
+            ref = xp.findDataRef(_HSI_SOURCE_DREF)
+            if ref:
+                xp.setDatai(ref, int(source))
+                self._log(f"HSI source → {source}")
+        except Exception as exc:
+            self._log("set_hsi_source error:", exc)
+
+    # ── Autopilot approach mode ───────────────────────────────────────────────
+
+    def _ap_read_approach_status(self) -> Optional[int]:
+        """Return AP approach status: 0=off, 1=armed, 2=captured. None on failure."""
+        try:
+            ref = xp.findDataRef(_AP_APPROACH_DREF)
+            return int(xp.getDatai(ref)) if ref else None
+        except Exception:
+            return None
+
+    def _cmd_arm_approach(self) -> None:
+        """Fire the autopilot approach mode command."""
+        try:
+            ref = xp.findCommand(_AP_APPROACH_CMD)
+            if ref:
+                xp.commandOnce(ref)
+                self._log("AP APPR armed")
+        except Exception as exc:
+            self._log("arm_approach error:", exc)
 
     def _find_proc_navaid(self, ident: str, center_lat, center_lon):
         """Resolve a procedure fix ident to a navaid ref, rejecting results that are

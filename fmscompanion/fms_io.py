@@ -539,7 +539,11 @@ class FmsIOMixin:
             loaded_via_plan = False
             try:
                 plan_text = self._read_plan_text(plan.full_path)
+                self._clear_fms()
                 loaded_via_plan = self._load_fms_plan_text(plan_text, plan.filename)
+                if loaded_via_plan and self._read_fms_entry_count() != len(entries):
+                    self._log("loadFMSFlightPlan entry count mismatch — falling back")
+                    loaded_via_plan = False
             except Exception as exc:
                 self._log("Could not read FMS plan text", plan.filename, exc)
             if not loaded_via_plan:
@@ -651,9 +655,10 @@ class FmsIOMixin:
             fms_text = self._build_route_entry_fms_text(parsed)
             loaded_ok = False
             if fms_text:
+                self._clear_fms()
                 loaded_ok = self._load_fms_plan_text(fms_text, "CUSTOM")
-                if loaded_ok and self._read_fms_entry_count() < len(entries):
-                    self._log("loadFMSFlightPlan dropped entries — falling back to lat/lon method")
+                if loaded_ok and self._read_fms_entry_count() != len(entries):
+                    self._log("loadFMSFlightPlan entry count mismatch — falling back to lat/lon method")
                     loaded_ok = False
             if not loaded_ok:
                 if not self._write_route_entry_into_flight_plan(entries):

@@ -43,6 +43,7 @@ class NavMonitorMixin:
         self.nav_advisories: list = []   # list of str, read by UIMixin
         self.fuel_on_board_kg: float = 0.0
         self.fuel_flow_kg_s:   float = 0.0
+        self._tod_beeped: bool = False    # cleared when dist_to_tod resets > 10 nm
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -109,16 +110,43 @@ class NavMonitorMixin:
         return 2.0  # reschedule in 2 seconds
 
     def _nm_update(self):
-        gs_kt = self._nm_getf("gs")
-        xtk   = self._nm_getf("xtk")
+        gs_kt    = self._nm_getf("gs")
+        xtk      = self._nm_getf("xtk")
+        airborne = gs_kt >= _GS_AIRBORNE_KT
 
         advisories = []
 
-        if gs_kt >= _GS_AIRBORNE_KT:
+        if airborne:
             if abs(xtk) > _XTK_WARN_DOTS:
                 side = "R" if xtk > 0 else "L"
                 advisories.append(f"OFF COURSE  {abs(xtk):.1f} dot {side}")
 
+            tod = self._ui_compute_tod() if hasattr(self, "_ui_compute_tod") else None
+            if tod is not None:
+                dist = tod["dist_to_tod"]
+                if dist < 0.5 and not self._tod_beeped:
+                    self._tod_beeped = True
+                    self._nm_play_tod_beep()
+                elif dist > 10.0:
+                    self._tod_beeped = False
+        else:
+            self._tod_beeped = False
+
         self.fuel_on_board_kg = self._nm_getf("fuel_kg")
         self.fuel_flow_kg_s   = self._nm_read_fuel_flow()
         self.nav_advisories   = advisories
+
+    def _nm_play_tod_beep(self):
+        try:
+            import sys
+            if sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(
+                    ["afplay", "/System/Library/Sounds/Ping.aiff"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            elif sys.platform == "win32":
+                import winsound
+                winsound.Beep(880, 400)
+        except Exception as exc:
+            self._log("TOD beep error:", exc)
